@@ -36,7 +36,7 @@ The unified TypeScript harness provides:
 - Temporal scheduling, durable outbox reconciliation, per-agent serialization and cleanup.
 - Native Pi session checkpoints published atomically with inbox acknowledgement.
 - Invocation fencing, confirmed-result reuse and explicit inspection of ambiguous failures.
-- A React activity viewer for sessions, tool results, working logs and task state.
+- Authenticated activity history and SSE APIs, with CLI replay and observation.
 
 The runtime retains each sandbox between turns; idle guests remain alive and billed.
 VM pause/resume and automated sandbox replacement are not implemented. The API's
@@ -109,21 +109,22 @@ so their inbox remains pending. Each invocation creates a fresh run and leaves i
 records for inspection. Use a dedicated demo database; there is no shared-data
 reset command.
 
-## Agent activity viewer
+## Agent activity APIs and CLI
 
 Pi session messages, visible text, tool output and agent working logs are recorded
-as ordered Atlas events. The read-only viewer shows each agent's activity, session
-history and working notes; notes are labeled as agent reports and do not approve tasks.
+as ordered Atlas events. The CLI can inspect an agent, replay history and watch
+live activity. Working notes are agent reports and do not approve tasks.
 
 ```sh
-pnpm demo:activity
+pnpm cli agent <runId> <agentId>
+pnpm cli history <runId> [agentId] [afterCursor]
+pnpm cli watch <runId> [agentId] [afterCursor]
 ```
 
-Open <http://127.0.0.1:5174/?demo=1> for a scripted fixture using a real temporary
-local MongoDB replica set. It makes no model calls or Modal sandboxes. For a real
-run, use `pnpm dev:web` and connect with `ADMIN_TOKEN`; CLI `history` and `watch`
-support paginated replay and reconnecting observation. See [activity setup and
-limits](docs/activity.md) and [runtime setup](docs/runtime.md).
+The browser UI is developed separately against the authenticated backend APIs.
+This runtime includes the activity contract and CLI, with paginated replay and
+reconnecting observation. See [activity APIs and limits](docs/activity.md) and
+[runtime setup](docs/runtime.md).
 
 ## Checks
 

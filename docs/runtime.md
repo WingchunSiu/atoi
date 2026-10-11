@@ -199,8 +199,9 @@ charges, bounded by a 20-minute run and per-turn request/tool/time limits.
 [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
 are temporary development endpoints. The health probe resolves IPv4 DNS directly
 to avoid stale negative system DNS caches for newly allocated tunnel hostnames;
-TLS certificate verification remains enabled. Use the viewer locally: Quick Tunnels do
-not support SSE. Hosted deployment needs a stable HTTPS endpoint.
+TLS certificate verification remains enabled. Quick Tunnels do not support SSE;
+use a local endpoint for CLI activity observation or a stable HTTPS endpoint for
+remote consumers.
 
 ## Integration and development state
 
@@ -210,7 +211,7 @@ Ryan's versioned review transitions. Real guests require current invocation and
 generation headers as well as their scoped bearer token. Model execution,
 checkpoint publication and lifecycle Activities share the same `runs`, `agents`,
 `deliveries`, `outbox` and `agent_events` schema. Activity API responses convert
-those canonical event records into the viewer DTO; no second event store exists.
+those canonical event records into the activity DTO; no second event store exists.
 
 The former uncommitted runtime draft used incompatible `agentId/state` deliveries
 and `sent/kind=wake` outbox records. Do not run that draft against the current

@@ -1,46 +1,15 @@
-# Agent activity viewer
+# Agent activity APIs and CLI
 
 The activity layer records Pi messages, tool starts/results, visible text updates,
 working notes and invocation lifecycle events. Workers send scoped API requests;
 the backend stores events in Atlas and exposes history plus an authenticated SSE
-feed. Browser sessions do not own the run lifetime.
-
-## Try the offline demo
-
-With Node 24 or later:
-
-```sh
-pnpm install --frozen-lockfile
-pnpm demo:activity
-```
-
-Open <http://127.0.0.1:5174/?demo=1>. Select an agent, switch between Activity,
-Session history and Working log, and expand Details for tool output. The demo uses
-scripted events, a real temporary local MongoDB replica set and the real API/SSE
-path. It makes no model calls and provisions no Modal sandboxes. It uses ports
-3100 and 5174, separate from the normal development servers. Ctrl-C removes
-the temporary database and stops both servers. It does not reset Atlas data.
-
-![Offline activity viewer](assets/agent-activity-demo.png)
-
-The scripted loop stops at its invocation limit; recorded history remains available
-until the demo process is stopped. Its task and verification text are fixtures.
+feed. Observers do not own the run lifetime. The browser UI is developed separately
+against these APIs; this runtime includes the backend contract and CLI.
 
 ## Observe a real run
 
-Start the control plane using [runtime setup](runtime.md), then:
-
-```sh
-pnpm dev:web
-```
-
-Open <http://127.0.0.1:5173> and connect with `ADMIN_TOKEN`. The token stays
-in the tab's memory, is sent in authorization headers and is never put in a URL or
-browser storage. The Vite development proxy forwards `/operator` to the local
-backend on port 3000. `pnpm build:web` produces `dist/web`; a hosted deployment
-must serve those files and route `/operator` to the same backend origin.
-
-The CLI uses the same operator authorization and feed:
+Start the control plane using [runtime setup](runtime.md). The CLI uses operator
+authorization and the persisted activity feed:
 
 ```sh
 pnpm cli agent <runId> <agentId>
@@ -96,11 +65,8 @@ native session ID. Tool arguments, results and notes are treated as untrusted da
   the invocation result failed rather than claiming a complete activity record.
 - Known runtime credentials are redacted. Oversized outputs retain a bounded
   preview and content hash. Model reasoning chunks are not sent as live text.
-- The browser keeps the latest 500 team events. Older events are available through
-  paginated history. Its Session history tab shows recorded messages and tool
-  results, rather than editing or replacing native recovery checkpoints.
 - A connected observer does not prove that an agent is healthy. Agent state comes
-  from Atlas; the UI separately shows connection state and last event receipt.
+  from Atlas; consumers can separately track connection state and last event receipt.
 - Sandbox loss can still lose text/partial output not yet acknowledged by the
   backend. The feed is observational; it does not provide exactly-once shell
   effects or expand the checkpoint/pushed-Git recovery guarantee.
@@ -108,5 +74,5 @@ native session ID. Tool arguments, results and notes are treated as untrusted da
 Focused tests use a real local MongoDB replica set and HTTP/SSE connections to
 check concurrent ordering, retries, cursor replay, authorization, stale-generation
 rejection, fragmented UTF-8, automatic reconnect, cancellation and server cleanup.
-The Pi runtime fixture checks continue to exercise native session recovery. A live
-Atlas + Modal + model run through the viewer remains an integration check to perform.
+The Pi runtime fixture checks continue to exercise native session recovery.
+Integration of the separately developed browser UI is a separate check.

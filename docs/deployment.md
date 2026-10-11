@@ -167,7 +167,8 @@ src/contracts/       Validated wire schemas shared by clients and services
 src/store/           Atlas repositories used only by trusted services
 ```
 
-The backend/runtime directories now exist; `web/` remains planned. Build the sandbox
+The backend/runtime directories now exist; the browser UI is developed separately
+against the backend APIs. Build the sandbox
 worker from its own entry point; it must not bundle the backend or trusted credentials.
 Keep workflow definitions separate from Activity implementations so deterministic
 workflow code does not import database or sandbox clients.
