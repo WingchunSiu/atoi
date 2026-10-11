@@ -45,9 +45,9 @@ runtime-enabled agents. Task approval requires an independent reviewer of the ex
 commit, but evidence remains agent-reported rather than trusted evaluator output.
 
 Local tests cover the integrated harness with scripted inference and sandbox fixtures.
-A previous real Modal smoke check passed. The latest full cloud E2E attempt stopped
-at public tunnel readiness before provisioning guests or calling the model; real
-Atlas plus live-model collaboration is still unverified. See [runtime setup and
+Real Atlas + Modal + Pi + live-model E2E passed, including independent review,
+peer wakeup, native checkpoint history, private file reuse and confirmed cleanup.
+The check uses a read-only public Git commit; private Git push remains unverified. See [runtime setup and
 limits](docs/runtime.md).
 
 ## Run locally

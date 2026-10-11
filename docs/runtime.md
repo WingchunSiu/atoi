@@ -132,13 +132,22 @@ uses scripted model/backend fixtures, and terminates it in `finally`. It verifie
 SDK loading, native Pi tools, retained files, reattachment and session restoration
 in a second guest process. It writes a local report to `.atoi/modal-smoke.json`.
 An earlier runtime draft passed this check on October 11, 2026. The integrated
-lockfile/image has not yet been rechecked against Modal; this is not an Atlas or
-live-model check.
+lockfile/image was subsequently exercised by the real-model E2E below; the smoke
+command itself uses scripted inference and does not verify Atlas.
 
-The real-cloud check below records its database mode explicitly. The latest
-attempt with a local replica set timed out waiting for the public backend before
-any Modal guest or model request was created. Full Atlas/live-model E2E and
-private Git push have not been verified.
+The real-cloud check below records its database mode explicitly. On October 11,
+2026, it passed against the hackathon Atlas cluster in `atoi_e2e`, with two real
+Modal guests and OpenAI `gpt-4.1`. Both agents completed two turns: independent
+exact-commit review, peer DM/wakeup, native session restoration and retained
+private file reuse. The check compares native session IDs and prior entry IDs
+across checkpoints and requires a successful `read` tool result on the follow-up.
+Cleanup and a new Atlas connection passed. A separate post-run inspection found
+one done task, four checkpoints, both agents stopped, and no pending deliveries
+or outbox records. Recorded main-agent usage was 17,652 input tokens, 2,397 output
+tokens and $0.103312; this excludes Modal/control-plane costs and describes one
+read-only verification task, not a cost comparison. A local replica-set run with
+real Modal/inference also passed. Private Git push remains unverified.
+
 Native session restoration was tested in a new local workspace and a second
 process in the same real Modal sandbox. The full operator workflow for replacing
 a lost sandbox is not wired yet; ambiguous interrupted turns require inspection.
@@ -154,7 +163,9 @@ verified success.
 The planning orchestrator's spawn/completion tools,
 automated sandbox replacement, semantic knowledge discovery and reuse across
 completed runs remain later slices of [Milestone 1](milestone-1.md). This runtime
-does not complete the entire milestone or establish the hackathon's Atlas requirement.
+does not complete the entire milestone. The verified E2E stores coordination
+state and checkpoints in the provided Atlas cluster; it does not host guest
+compute inside Atlas.
 
 No shared-data reset is performed automatically. Stop specific runs through the
 API. For isolated local demos, choose a fresh database name and Temporal history
@@ -186,7 +197,9 @@ the hackathon's Atlas requirement. It makes real model calls and incurs provider
 charges, bounded by a 20-minute run and per-turn request/tool/time limits.
 
 [Cloudflare Quick Tunnels](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)
-are temporary development endpoints. Use the viewer locally: Quick Tunnels do
+are temporary development endpoints. The health probe resolves IPv4 DNS directly
+to avoid stale negative system DNS caches for newly allocated tunnel hostnames;
+TLS certificate verification remains enabled. Use the viewer locally: Quick Tunnels do
 not support SSE. Hosted deployment needs a stable HTTPS endpoint.
 
 ## Integration and development state

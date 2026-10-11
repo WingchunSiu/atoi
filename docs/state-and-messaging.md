@@ -142,5 +142,6 @@ The HTTP demo uses synthetic identities and evidence. The runtime implements
 Temporal relay, invocation leases, checkpoint publication, Modal provisioning,
 Pi execution and agent lifecycle updates. It acknowledges inbox work only with a
 durable checkpoint. Task reassignment, the planning orchestrator's tools and
-automated sandbox replacement remain future work. Live Atlas integration is
-still unverified.
+automated sandbox replacement remain future work. A real Atlas/Modal/Pi/model
+E2E passed for independent review, peer wakeup, native checkpoint and private file
+reuse, and cleanup; see [the recorded scope and limits](runtime.md#verification-and-limits).

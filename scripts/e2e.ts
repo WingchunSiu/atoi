@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { type ChildProcess, spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
+import { resolve4 } from "node:dns/promises";
 import { mkdir, writeFile } from "node:fs/promises";
+import { get as httpsGet } from "node:https";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { TestWorkflowEnvironment } from "@temporalio/testing";
@@ -30,6 +32,12 @@ const agentSecret = randomBytes(32).toString("hex");
 const operatorToken = randomBytes(32).toString("hex");
 const marker = `violet-raven-${randomUUID()}`;
 const taskQueue = `atoi-e2e-${randomUUID()}`;
+function safeError(error: unknown): string {
+  let message = error instanceof Error ? error.message : "E2E failure";
+  for (const secret of [process.env.MONGODB_URI, modelApiKey, agentSecret, operatorToken])
+    if (secret) message = message.split(secret).join("[REDACTED]");
+  return message.replace(/mongodb(?:\+srv)?:\/\/[^\s]+/g, "[REDACTED DATABASE URI]");
+}
 const report: Record<string, unknown> = {
   timestamp: new Date().toISOString(),
   database: localDatabase ? "local replica set" : "configured MongoDB",
@@ -68,6 +76,31 @@ async function waitFor(predicate: () => Promise<boolean>, label: string, timeout
     }
     await delay(500);
   }
+}
+async function publicBackendReady(backendUrl: string): Promise<boolean> {
+  // Fresh tunnel names can remain negatively cached by macOS getaddrinfo.
+  // Query DNS directly, preserving the original hostname for TLS and HTTP.
+  return new Promise((resolve) => {
+    const request = httpsGet(
+      new URL("/health", backendUrl),
+      {
+        family: 4,
+        lookup: (hostname, _options, callback) => {
+          resolve4(hostname).then(
+            (addresses) => callback(null, addresses[0]!, 4),
+            (error: Error) => callback(error, "", 4),
+          );
+        },
+        timeout: 3000,
+      },
+      (response) => {
+        response.resume();
+        resolve(response.statusCode === 200);
+      },
+    );
+    request.on("timeout", () => request.destroy(new Error("Health request timed out")));
+    request.on("error", () => resolve(false));
+  });
 }
 async function startTunnel(localUrl: string): Promise<string> {
   const executable = process.env.CLOUDFLARED_PATH ?? "cloudflared";
@@ -120,20 +153,7 @@ try {
   api = createServer(store, { operatorToken, agentSecret });
   const localUrl = await api.listen({ host: "127.0.0.1", port: 0 });
   const backendUrl = process.env.E2E_BACKEND_URL ?? (await startTunnel(localUrl));
-  await waitFor(
-    async () => {
-      try {
-        const response = await fetch(new URL("/health", backendUrl), {
-          signal: AbortSignal.timeout(3000),
-        });
-        return response.ok;
-      } catch {
-        return false;
-      }
-    },
-    "public backend",
-    60000,
-  );
+  await waitFor(() => publicBackendReady(backendUrl), "public backend", 60000);
   console.log("Backend reachable over HTTPS; starting real Modal/Pi workers.");
   modalClient = new ModalClient();
   provider = new ModalAgents(modalClient, {
@@ -249,6 +269,47 @@ try {
       `${agent.role} must actually execute verification`,
     );
   }
+  const turns = await store.invocations
+    .find({ agentId: implementer._id, status: "completed" })
+    .sort({ generation: 1 })
+    .toArray();
+  assert.ok(turns.length >= 2);
+  let previousEntries: { id?: string; type: string }[] | undefined;
+  for (const turn of turns) {
+    const checkpoint: { jsonl: string } | null = await store.checkpoints.findOne({ _id: turn._id });
+    assert.ok(checkpoint);
+    const entries: { id?: string; type: string }[] = checkpoint.jsonl
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    assert.equal(entries[0]!.type, "session");
+    if (previousEntries) {
+      assert.equal(
+        entries[0]!.id,
+        previousEntries[0]!.id,
+        "Native Pi session identity must persist",
+      );
+      const entryIds = new Set(entries.map((entry) => entry.id));
+      for (const entry of previousEntries)
+        if (entry.id)
+          assert.ok(entryIds.has(entry.id), "Prior native session entries must survive");
+    }
+    previousEntries = entries;
+  }
+  const followupReads = await store.events
+    .find({
+      runId,
+      actorId: implementer._id,
+      kind: "tool_execution_end",
+      "details.invocationId": turns.at(-1)!._id,
+      "details.payload.toolName": "read",
+      "details.payload.isError": { $ne: true },
+    })
+    .toArray();
+  assert.ok(
+    followupReads.some((event) => JSON.stringify(event.details).includes(marker)),
+    "Follow-up must actually read the retained private file",
+  );
   const guest = await modalClient.sandboxes.fromId(
     (await store.getAgent(implementer._id)).sandboxId!,
   );
@@ -292,7 +353,7 @@ try {
   );
 } catch (error) {
   report.status = "failed";
-  report.error = error instanceof Error ? error.message : "E2E failure";
+  report.error = safeError(error);
   if (store && runId) {
     report.agents = await store.agents.find({ runId }, { projection: { tokenHash: 0 } }).toArray();
     report.invocations = await store.invocations
@@ -349,6 +410,15 @@ try {
       const db = second.db(store.db.databaseName);
       const run = await db.collection("runs").findOne({ _id: runId } as never);
       report.reconnectPersistence = run?.status === "stopped" ? "passed" : "failed";
+      if (report.reconnectPersistence === "failed") {
+        report.status = "failed";
+        process.exitCode = 1;
+      }
+    } catch (error) {
+      report.reconnectPersistence = "failed";
+      report.reconnectError = safeError(error);
+      report.status = "failed";
+      process.exitCode = 1;
     } finally {
       await second.close();
     }
