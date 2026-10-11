@@ -28,7 +28,7 @@ export class MockRun {
   private started = false;
   private sentByRequest = new Map<string, string>();
   private userMessages = 0;
-  private orchestrator?: { id: string; generation: number; state: string };
+  private orchestrator?: { id: string; generation: number; state: string; invocationId?: string };
   private status?: RunStatus;
 
   constructor(
@@ -96,6 +96,7 @@ export class MockRun {
         ...this.orchestrator,
         generation: Number(out.generation),
         state: String(out.state),
+        invocationId: typeof out.invocationId === "string" ? out.invocationId : undefined,
       };
     }
     this.events.push(out);
@@ -141,16 +142,22 @@ export class MockRun {
     const deliveryId = `d_user_${n}`;
     this.write({ type: "delivery.queued", agentId: orch.id, deliveryId, messageId });
 
-    // The scripted orchestrator wakes unless it's mid-invocation, reads the DM and replies.
-    const idle = orch.state !== "running" && orch.state !== "checkpointing";
+    // The scripted orchestrator reads the DM and replies. If it's idle when the wake fires, it
+    // runs its own invocation for that; if the fixture has it busy, it replies from within the
+    // fixture's invocation and leaves that invocation's state alone.
+    const invocationId = `inv_mock_${n}`;
+    let woke = false;
     this.later(700, () => {
-      if (idle) {
+      const current = this.orchestrator!;
+      if (current.state !== "running" && current.state !== "checkpointing") {
+        woke = true;
         this.write({ type: "agent.woken", agentId: orch.id, reason: "dm", causedBy: messageId });
         this.write({
           type: "agent.state",
           agentId: orch.id,
           state: "running",
-          generation: this.orchestrator!.generation,
+          generation: current.generation,
+          invocationId,
         });
       }
       this.write({
@@ -158,6 +165,7 @@ export class MockRun {
         agentId: orch.id,
         tool: "read_channel",
         summary: "dm with you, 1 message",
+        invocationId: woke ? invocationId : current.invocationId,
       });
     });
     this.later(2400, () => {
@@ -174,12 +182,15 @@ export class MockRun {
         body: `[mock reply] This is a scripted stand-in for the orchestrator. A live one would plan your message ("${excerpt}${req.body.length > 80 ? "…" : ""}") into tasks for the team.`,
       });
       this.write({ type: "delivery.done", agentId: orch.id, deliveryId, messageId });
-      if (idle && this.orchestrator?.state === "running") {
+      // Only end the invocation this reply started. If the script has changed the
+      // orchestrator's state since (for example it began its own invocation), leave it.
+      const current = this.orchestrator;
+      if (woke && current?.state === "running" && current.invocationId === invocationId) {
         this.write({
           type: "agent.state",
           agentId: orch.id,
           state: "waiting",
-          generation: this.orchestrator.generation,
+          generation: current.generation,
         });
       }
     });

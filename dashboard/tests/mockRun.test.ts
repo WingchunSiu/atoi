@@ -56,6 +56,25 @@ describe("mock run", () => {
     expect(dm[1]!.body).toContain("[mock reply]");
     expect(state.agents.a_orch!.pendingDeliveries).toEqual([]);
     expect(state.agents.a_orch!.wakes.at(-1)?.reason).toBe("dm");
+    // It ends the invocation it started for the reply.
+    expect(state.agents.a_orch!.state).toBe("waiting");
+    run.stop();
+  });
+
+  it("doesn't overwrite an invocation the script starts before the scripted reply", () => {
+    // Reported on PR #7: send while the orchestrator waits, then the fixture wakes it (inv_1)
+    // before the scripted reply fires. The reply must not put it back to waiting.
+    const run = started("happy-path");
+    vi.advanceTimersByTime(4_600);
+    const orch = () => fold(parsed(run)).agents.a_orch!;
+    expect(orch().state).toBe("waiting");
+    expect(run.send({ to: "a_orch", body: "hello", clientRequestId: "req-race" }).ok).toBe(true);
+    vi.advanceTimersByTime(2_399);
+    const during = orch();
+    expect(during.state).toBe("running");
+    const scripted = during.invocationId;
+    vi.advanceTimersByTime(1);
+    expect(orch()).toMatchObject({ state: "running", invocationId: scripted });
     run.stop();
   });
 

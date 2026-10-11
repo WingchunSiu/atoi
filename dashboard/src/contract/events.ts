@@ -254,7 +254,8 @@ export function parseEvent(raw: unknown): ParseResult {
   const head = typedEnvelope.safeParse(raw);
   if (!head.success) return { ok: false, error: z.prettifyError(head.error) };
   const { type, ...envelope } = head.data;
-  if (!(type in payloadSchemas)) {
+  // Own keys only: `in` would also match Object.prototype names like "constructor".
+  if (!Object.hasOwn(payloadSchemas, type)) {
     return { ok: true, event: { ...envelope, type: "unknown", originalType: type } };
   }
   const payload = payloadSchemas[type as RunEventType].safeParse(raw);

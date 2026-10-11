@@ -37,6 +37,13 @@ describe("parseEvent", () => {
     expect(!r.ok && r.error).toContain("message.sent");
   });
 
+  it("treats Object.prototype names as unknown types instead of throwing", () => {
+    for (const type of ["constructor", "toString", "hasOwnProperty", "__proto__"]) {
+      const r = parseEvent({ ...envelope, type });
+      expect(r.ok && r.event.type, type).toBe("unknown");
+    }
+  });
+
   it("accepts timestamps with offsets", () => {
     expect(
       parseEvent({ ...envelope, ts: "2026-10-11T15:50:00+02:00", type: "worker.restarted" }).ok,
