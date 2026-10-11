@@ -77,3 +77,11 @@ export async function runSupervisor(runId: string, deadlineMs: number): Promise<
 export async function cleanupAgentWorkflow(agentId: string): Promise<void> {
   await lifecycle.stopAgent(agentId);
 }
+
+export async function replaceAgentWorkflow(agentId: string, requestId: string): Promise<void> {
+  try {
+    await lifecycle.replaceAgent(agentId, requestId);
+  } catch {
+    await lifecycle.failRecovery(agentId, requestId);
+  }
+}

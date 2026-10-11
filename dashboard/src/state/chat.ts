@@ -1,7 +1,7 @@
 // What the chat panel shows. #team is the high-level view: messages plus run milestones.
 // A DM is the detailed view: the pair's messages interleaved with both agents' activity.
 import { type AgentId, type DashboardEvent, USER_ID } from "../contract/events";
-import { AGENT_STATE_LABEL, clock, sha } from "./format";
+import { AGENT_STATE_LABEL, clock, sha, truncate } from "./format";
 import { type Message, peerKey, type RunState } from "./reduce";
 import { describeTaskChange, roleOf } from "./selectors";
 
@@ -41,6 +41,14 @@ export function userDmKey(state: RunState): string | undefined {
   return orch ? peerKey(orch, USER_ID) : undefined;
 }
 
+/** Only operator/agent conversations have an operator composer. */
+export function operatorDmRecipient(state: RunState, key: string | null): AgentId | undefined {
+  const pair = key?.split("|") ?? [];
+  if (pair.length !== 2 || !pair.includes(USER_ID)) return undefined;
+  const id = pair.find((id) => id !== USER_ID);
+  return id && state.agents[id] ? id : undefined;
+}
+
 export function orchestratorId(state: RunState): AgentId | undefined {
   return state.agentOrder.find((id) => state.agents[id]?.kind === "orchestrator");
 }
@@ -69,7 +77,7 @@ function taskChangeText(
   const history = state.tasks[e.task.id]?.history ?? [];
   const i = history.findIndex((h) => h.seq === e.seq);
   if (i < 0) return undefined; // nothing that matters changed
-  return `${e.task.id} ${describeTaskChange(state, history[i - 1], history[i]!)}`;
+  return `${truncate(e.task.id, 13)} ${describeTaskChange(state, history[i - 1], history[i]!)}`;
 }
 
 /** #team: every team message, plus milestones a person watching the run cares about. */
@@ -83,6 +91,8 @@ export function teamItems(events: readonly DashboardEvent[], state: RunState): C
     switch (e.type) {
       case "run.state":
         if (e.status === "starting") text = `Run started${e.objective ? `: ${e.objective}` : ""}`;
+        else if (e.status === "available")
+          text = "Objective completed. Team available for follow-ups.";
         else if (e.status === "completed")
           text = `Run completed${state.run?.finalCommit ? ` at ${sha(state.run.finalCommit)}` : ""}`;
         else if (e.status === "failed" || e.status === "cancelled") {

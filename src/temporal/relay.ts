@@ -9,10 +9,46 @@ export async function reconcile(
   store: MongoStore,
   client: Client,
   taskQueue: string,
+  onlyRunId?: string,
 ): Promise<void> {
+  const runScope = onlyRunId ? { _id: onlyRunId } : {};
   // The Atlas run record itself is a durable supervisor-start request. A failed
   // API response or missed outbox wakeup cannot strand an accepted run.
-  for (const run of await store.runs.find({ status: "active" }).toArray()) {
+  for (const run of await store.runs.find({ ...runScope, status: "active" }).toArray()) {
+    if (!(run.deadline instanceof Date)) {
+      // Historical coordination-only runs have no runtime lifecycle. Retain an
+      // actionable diagnostic, and do not let one old record strand new runs.
+      await store.outbox.updateMany(
+        { runId: run._id, status: "pending" },
+        {
+          $set: { error: "Run lacks lifecycle fields; start a fresh runtime run" },
+        },
+      );
+      continue;
+    }
+    for (const agent of await store.agents
+      .find({ runId: run._id, "recovery.status": "pending" })
+      .toArray()) {
+      try {
+        await client.workflow.start("replaceAgentWorkflow", {
+          workflowId: `replace/${agent._id}/${agent.recovery!.requestId}`,
+          taskQueue,
+          args: [agent._id, agent.recovery!.requestId],
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+        });
+      } catch (error) {
+        if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+        const execution = await client.workflow
+          .getHandle(`replace/${agent._id}/${agent.recovery!.requestId}`)
+          .describe();
+        if (
+          ["FAILED", "CANCELLED", "TERMINATED", "TIMED_OUT", "COMPLETED"].includes(
+            execution.status.name,
+          )
+        )
+          await store.failRecovery(agent._id, agent.recovery!.requestId);
+      }
+    }
     try {
       await client.workflow.start("runSupervisor", {
         workflowId: `run/${run._id}`,
@@ -57,7 +93,7 @@ export async function reconcile(
   }
   // Acknowledging a cleanup dispatch is not the same as successful termination.
   // Retain failed outcomes and retry a bounded number of cleanup workflows.
-  for (const run of await store.runs.find({ status: "stopping" }).toArray()) {
+  for (const run of await store.runs.find({ ...runScope, status: "stopping" }).toArray()) {
     for (const event of await store.outbox
       .find({ runId: run._id, kind: "stop", status: "sent" })
       .toArray()) {
@@ -75,10 +111,14 @@ export async function reconcile(
       }
     }
   }
-  for (const event of await store.outbox.find({ status: "pending" }).limit(100).toArray()) {
+  for (const event of await store.outbox
+    .find({ ...(onlyRunId ? { runId: onlyRunId } : {}), status: "pending" })
+    .limit(100)
+    .toArray()) {
     try {
       const run = await store.getRun(event.runId);
       if (event.kind === "mailbox_wakeup" && run.status === "active") {
+        if (!(run.deadline instanceof Date)) continue;
         if ((await store.getAgent(event.recipientId)).status === "needs_inspection") continue;
         await client.workflow.signalWithStart("agentWorkflow", {
           workflowId: `agent/${event.recipientId}`,

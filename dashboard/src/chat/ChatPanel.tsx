@@ -6,7 +6,7 @@ import {
   dmItems,
   dmLabel,
   nameOf,
-  orchestratorId,
+  operatorDmRecipient,
   type Tone,
   teamItems,
   userDmKey,
@@ -89,7 +89,9 @@ function MilestoneRow({ item }: { item: Extract<ChatItem, { kind: "milestone" }>
   return (
     <li className="flex items-baseline gap-3 px-4 pt-2 text-chip">
       <span className="w-9 shrink-0 text-right text-muted">{shortClock(item.ts)}</span>
-      <span className={`border-l-2 border-current pl-2 ${TONE[item.tone]}`}>
+      <span
+        className={`min-w-0 border-l-2 border-current pl-2 [overflow-wrap:anywhere] ${TONE[item.tone]}`}
+      >
         <RichText text={item.text} />
       </span>
     </li>
@@ -230,7 +232,7 @@ function Header({
           {dmLabel(state, chat)}
         </h2>
         <p className="text-chip text-muted">
-          {isUser ? "Your direct line to the orchestrator" : "Direct messages"}
+          {isUser ? "Your direct conversation" : "Direct messages"}
         </p>
       </div>
       <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-chip">
@@ -252,7 +254,7 @@ function newRequestId(): string {
     : `req_${Date.now()}_${Math.random().toString(36).slice(2)}`;
 }
 
-function Composer({ state, orchestrator }: { state: RunState; orchestrator: AgentId }) {
+function Composer({ state, recipient }: { state: RunState; recipient: AgentId }) {
   const { source, outbox } = useRun();
   const focusTick = useUi((u) => u.focusComposer);
   const [text, setText] = useState("");
@@ -261,12 +263,13 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
     if (focusTick) area.current?.focus();
   }, [focusTick]);
 
-  const orch = state.agents[orchestrator];
+  const agent = state.agents[recipient];
+  const label = recipient === "team" ? "team" : (agent?.role ?? "agent");
   const runOver = state.run && TERMINAL_RUN_STATUSES.has(state.run.status);
   const blocked = runOver
-    ? `The run is ${state.run!.status}. Start a new run from the CLI to give more instructions.`
-    : orch && (orch.state === "stopped" || orch.state === "failed")
-      ? `The orchestrator has ${orch.state === "stopped" ? "stopped" : "failed"}.`
+    ? `The run is ${state.run!.status}. Start a new run to give more instructions.`
+    : agent && (agent.state === "stopped" || agent.state === "failed")
+      ? `The ${label} has ${agent.state === "stopped" ? "stopped" : "failed"}.`
       : undefined;
 
   const submit = async () => {
@@ -274,7 +277,7 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
     if (!body || blocked) return;
     const item: Outgoing = {
       clientRequestId: newRequestId(),
-      to: orchestrator,
+      to: recipient,
       body,
       ts: new Date().toISOString(),
       status: "sending",
@@ -282,7 +285,7 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
     outbox.set((o) => ({ items: [...o.items, item] }));
     setText("");
     const result = await source.send({
-      to: orchestrator,
+      to: recipient,
       body,
       clientRequestId: item.clientRequestId,
     });
@@ -320,8 +323,10 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
               }
             }}
             rows={Math.min(6, Math.max(2, text.split("\n").length))}
-            placeholder="Message orchestrator"
-            aria-label="Message orchestrator"
+            placeholder={
+              recipient === "team" ? "Post to team (readable, no wakeup)" : `Message ${label}`
+            }
+            aria-label={`Message ${label}`}
             className="min-w-0 flex-1 resize-none rounded-box border-2 border-ink bg-paper px-2.5 py-1.5 font-sans text-[15px] leading-[22px] text-ink placeholder:text-muted"
           />
           <button
@@ -334,9 +339,7 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
         </div>
       )}
       {!blocked && source.mock && (
-        <p className="mt-1.5 text-chip text-muted">
-          Mock run: the orchestrator's reply is scripted.
-        </p>
+        <p className="mt-1.5 text-chip text-muted">Mock run: the reply is scripted.</p>
       )}
     </form>
   );
@@ -351,8 +354,8 @@ export function ChatPanel() {
   const events = useRunSnapshot(selectEvents);
   const state = useRunState();
   const userKey = userDmKey(state);
-  const orchestrator = orchestratorId(state);
-  const isUserDm = !!chat && chat === userKey;
+  const recipient = operatorDmRecipient(state, chat);
+  const isUserDm = !!recipient;
   const pending = useStore(outbox, (o) => o.items);
 
   const items = useMemo(
@@ -370,7 +373,11 @@ export function ChatPanel() {
       outbox.set((o) => ({ items: o.items.filter((p) => !echoed.has(p.clientRequestId)) }));
     }
   }, [echoed, pending, outbox]);
-  const visiblePending = isUserDm ? pending.filter((p) => !echoed.has(p.clientRequestId)) : [];
+  const visiblePending = pending.filter(
+    (p) =>
+      !echoed.has(p.clientRequestId) &&
+      ((!chat && p.to === "team") || (isUserDm && p.to === recipient)),
+  );
 
   const retry = useCallback(
     async (item: Outgoing) => {
@@ -440,7 +447,7 @@ export function ChatPanel() {
               {!chat
                 ? "No team messages yet."
                 : isUserDm
-                  ? "Send the orchestrator a message. It reads it the next time it wakes."
+                  ? "Send this agent a message. It reads it the next time it wakes."
                   : `No messages between ${pairNames} yet.`}
             </p>
           )}
@@ -488,7 +495,8 @@ export function ChatPanel() {
           </button>
         )}
       </div>
-      {isUserDm && orchestrator && <Composer state={state} orchestrator={orchestrator} />}
+      {recipient && <Composer key={recipient} state={state} recipient={recipient} />}
+      {!chat && source.kind === "live" && <Composer key="team" state={state} recipient="team" />}
     </section>
   );
 }

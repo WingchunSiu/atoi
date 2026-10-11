@@ -110,7 +110,7 @@ export class CoordinationStore {
         generation: actor.generation,
         createdAt: new Date(),
       },
-      { session },
+      { session, ignoreUndefined: true },
     );
   }
   async authenticate(
@@ -292,6 +292,9 @@ export class CoordinationStore {
     const id = stableId(actor.runId, actor.agentId, "task", input.requestId);
     return this.transaction(async (session) => {
       await this.authorizeActor(actor, session);
+      const run = await this.activeRun(actor.runId, session);
+      if (run.completion && !run.completion.confirmed)
+        throw conflict("Objective completion is awaiting its checkpoint");
       const existing = await this.tasks.findOne({ _id: id }, { session });
       if (existing) {
         if (existing.fingerprint !== fingerprint)
@@ -319,8 +322,15 @@ export class CoordinationStore {
         createdAt: new Date(),
         updatedAt: new Date(),
       };
+      if (run.completion?.confirmed) {
+        await this.runs.updateOne({ _id: run._id }, { $unset: { completion: "" } }, { session });
+        await this.event(session, actor, "run.state", run._id, {
+          status: "running",
+          outcome: "Working on a follow-up task",
+        });
+      }
       await this.tasks.insertOne(task, { session });
-      await this.event(session, actor, "task.created", id);
+      await this.event(session, actor, "task.created", id, { task });
       return task;
     });
   }
@@ -354,7 +364,7 @@ export class CoordinationStore {
         { session, returnDocument: "after" },
       );
       if (!updated) throw conflict("Task was claimed concurrently");
-      await this.event(session, actor, "task.claimed", id);
+      await this.event(session, actor, "task.claimed", id, { task: updated });
       return updated;
     });
   }
@@ -422,6 +432,7 @@ export class CoordinationStore {
       );
       if (!replaced.matchedCount) throw conflict("Task changed concurrently");
       await this.event(session, actor, "task.updated", id, {
+        task: next,
         from: task.status,
         to: next.status,
         version: next.version,
@@ -451,10 +462,11 @@ export class CoordinationStore {
     const id = stableId(actor.runId, "dm", ...participants);
     return this.transaction(async (session) => {
       await this.authorizeActor(actor, session);
-      requireValue(
-        await this.agents.findOne({ _id: peerId, runId: actor.runId }, { session }),
-        "Peer not found in this run",
-      );
+      if (peerId !== "operator")
+        requireValue(
+          await this.agents.findOne({ _id: peerId, runId: actor.runId }, { session }),
+          "Peer not found in this run",
+        );
       const existing = await this.channels.findOne({ _id: id }, { session });
       if (existing) return existing;
       const channel: Channel = {
@@ -481,94 +493,110 @@ export class CoordinationStore {
       ),
     );
   }
-  async sendMessage(actor: Actor, channelId: string, input: NewMessage) {
+  async sendMessage(
+    actor: Actor,
+    channelId: string,
+    input: NewMessage,
+    session?: ClientSession,
+  ): Promise<Message> {
+    if (!session)
+      return this.transaction((active) => this.sendMessage(actor, channelId, input, active));
     const mentions = [...input.mentions].sort();
     const fingerprint = hash(
       JSON.stringify({ channelId, body: input.body, mentions, replyTo: input.replyTo }),
     );
     const id = stableId(actor.runId, actor.agentId, "message", input.requestId);
-    return this.transaction(async (session) => {
-      await this.authorizeActor(actor, session);
-      const channel = await this.channel(actor, channelId, session);
-      const existing = await this.messages.findOne({ _id: id }, { session });
-      if (existing) {
-        if (existing.fingerprint !== fingerprint)
-          throw conflict("Message request ID reused with different content");
-        return existing;
-      }
-      if (
-        input.replyTo &&
-        !(await this.messages.findOne(
-          { _id: input.replyTo, channelId, runId: actor.runId },
-          { session },
-        ))
-      )
-        throw new Problem(400, "invalid_reply", "Reply must reference a message in this channel");
-      const memberCount = await this.agents.countDocuments(
-        { runId: actor.runId, _id: { $in: mentions } },
+    await this.authorizeActor(actor, session);
+    const channel = await this.channel(actor, channelId, session);
+    const existing = await this.messages.findOne({ _id: id }, { session });
+    if (existing) {
+      if (existing.fingerprint !== fingerprint)
+        throw conflict("Message request ID reused with different content");
+      return existing;
+    }
+    if (
+      input.replyTo &&
+      !(await this.messages.findOne(
+        { _id: input.replyTo, channelId, runId: actor.runId },
+        { session },
+      ))
+    )
+      throw new Problem(400, "invalid_reply", "Reply must reference a message in this channel");
+    const memberCount = await this.agents.countDocuments(
+      { runId: actor.runId, _id: { $in: mentions } },
+      { session },
+    );
+    if (
+      memberCount !== mentions.length ||
+      (channel.kind === "dm" && mentions.some((id) => !channel.participants.includes(id)))
+    )
+      throw new Problem(400, "invalid_mentions", "Mentions must be members of this channel");
+    const recipients = (channel.kind === "dm" ? channel.participants : mentions).filter(
+      (id) => id !== actor.agentId,
+    );
+    const counter = requireValue(
+      await this.channels.findOneAndUpdate(
+        { _id: channelId },
+        { $inc: { nextSequence: 1 } },
+        { session, returnDocument: "after" },
+      ),
+    );
+    const message: Message = {
+      _id: id,
+      runId: actor.runId,
+      channelId,
+      senderId: actor.agentId,
+      ...(actor.invocationId ? { invocationId: actor.invocationId } : {}),
+      requestId: input.requestId,
+      fingerprint,
+      body: input.body,
+      mentions,
+      recipients,
+      ...(input.replyTo ? { replyTo: input.replyTo } : {}),
+      sequence: counter.nextSequence,
+      createdAt: new Date(),
+    };
+    await this.messages.insertOne(message, { session });
+    for (const recipientId of recipients) {
+      if (recipientId === "operator") continue;
+      const deliveryId = stableId(id, recipientId);
+      await this.deliveries.insertOne(
+        {
+          _id: deliveryId,
+          runId: actor.runId,
+          recipientId,
+          messageId: id,
+          channelId,
+          sequence: message.sequence,
+          status: "pending",
+          createdAt: new Date(),
+        },
         { session },
       );
-      if (
-        memberCount !== mentions.length ||
-        (channel.kind === "dm" && mentions.some((id) => !channel.participants.includes(id)))
-      )
-        throw new Problem(400, "invalid_mentions", "Mentions must be members of this channel");
-      const recipients = (channel.kind === "dm" ? channel.participants : mentions).filter(
-        (id) => id !== actor.agentId,
+      await this.outbox.insertOne(
+        {
+          _id: deliveryId,
+          runId: actor.runId,
+          recipientId,
+          deliveryId,
+          kind: "mailbox_wakeup",
+          status: "pending",
+          createdAt: new Date(),
+        },
+        { session },
       );
-      const counter = requireValue(
-        await this.channels.findOneAndUpdate(
-          { _id: channelId },
-          { $inc: { nextSequence: 1 } },
-          { session, returnDocument: "after" },
-        ),
-      );
-      const message: Message = {
-        _id: id,
-        runId: actor.runId,
-        channelId,
-        senderId: actor.agentId,
-        requestId: input.requestId,
-        fingerprint,
-        body: input.body,
-        mentions,
-        recipients,
-        ...(input.replyTo ? { replyTo: input.replyTo } : {}),
-        sequence: counter.nextSequence,
-        createdAt: new Date(),
-      };
-      await this.messages.insertOne(message, { session });
-      for (const recipientId of recipients) {
-        const deliveryId = stableId(id, recipientId);
-        await this.deliveries.insertOne(
-          {
-            _id: deliveryId,
-            runId: actor.runId,
-            recipientId,
-            messageId: id,
-            channelId,
-            sequence: message.sequence,
-            status: "pending",
-            createdAt: new Date(),
-          },
-          { session },
-        );
-        await this.outbox.insertOne(
-          {
-            _id: deliveryId,
-            runId: actor.runId,
-            recipientId,
-            deliveryId,
-            kind: "mailbox_wakeup",
-            status: "pending",
-            createdAt: new Date(),
-          },
-          { session },
-        );
-      }
-      await this.event(session, actor, "message.sent", id, { channelId, recipientIds: recipients });
-      return message;
+      await this.event(session, { ...actor, agentId: recipientId }, "delivery.queued", deliveryId, {
+        deliveryId,
+        messageId: id,
+      });
+    }
+    await this.event(session, actor, "message.sent", id, {
+      channelId,
+      recipientIds: recipients,
+      message,
+      channelKind: channel.kind,
     });
+    return message;
   }
   async readChannel(actor: Actor, channelId: string, after = 0, limit = 50) {
     await this.channel(actor, channelId);

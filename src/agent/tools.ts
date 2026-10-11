@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { defineTool, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import type { AgentBackend } from "./backend.js";
+import { verifyArtifact } from "./git.js";
 
 const result = (value: unknown) => ({
   content: [{ type: "text" as const, text: JSON.stringify(value) }],
@@ -13,10 +14,41 @@ export function coordinationTools(
   invocationId: string,
   sessionId?: string,
   secrets: (string | undefined)[] = [],
+  kind: "worker" | "orchestrator" = "worker",
+  workspace = process.cwd(),
 ): ToolDefinition[] {
   const requestId = (callId: string) =>
     createHash("sha256").update(`${invocationId}:${callId}`).digest("hex");
   return [
+    ...(kind === "orchestrator"
+      ? [
+          defineTool({
+            name: "spawn_agent",
+            label: "Spawn worker",
+            description:
+              "Reserve a worker with its own workspace within the run limit. Reuse a stable requestId across retries. Provisioning is asynchronous; finish your turn while waiting.",
+            parameters: Type.Object({
+              requestId: Type.String(),
+              role: Type.String(),
+              instructions: Type.String(),
+            }),
+            execute: async (_id, params, signal) =>
+              result(await backend.request("/spawn", "POST", params, signal)),
+          }),
+          defineTool({
+            name: "complete_objective",
+            label: "Complete reviewed objective",
+            description:
+              "Record a completed objective after all tasks are independently approved. Supply the pushed final commit and summary. End your turn to checkpoint. The team remains available for operator follow-ups until Stop or its deadline; reuse existing peers for new tasks.",
+            parameters: Type.Object({
+              commit: Type.String({ pattern: "^[a-f0-9]{40}$" }),
+              summary: Type.String(),
+            }),
+            execute: async (_id, params, signal) =>
+              result(await backend.request("/complete-objective", "POST", params, signal)),
+          }),
+        ]
+      : []),
     defineTool({
       name: "write_work_log",
       label: "Record working notes",
@@ -62,7 +94,7 @@ export function coordinationTools(
       name: "send_message",
       label: "Message a peer",
       description:
-        "Persist a DM using recipientId, or a team post. Only DMs and explicit mentions wake peers. Return after sending; do not poll for replies.",
+        'Persist a DM using recipientId, or a team post. Use recipientId="operator" for the human operator; this is distinct from the orchestrator agent. Peer IDs come from list_agents. Only DMs and explicit mentions wake peers. Return after sending; do not poll for replies.',
       parameters: Type.Object({
         body: Type.String({ minLength: 1, maxLength: 16000 }),
         recipientId: Type.Optional(Type.String()),
@@ -216,10 +248,15 @@ export function coordinationTools(
           }),
         ),
       }),
-      execute: async (_id, { taskId, ...params }, signal) =>
-        result(
+      execute: async (_id, { taskId, ...params }, signal) => {
+        if (params.status === "in_review" && params.result)
+          await verifyArtifact(workspace, params.result.commit);
+        if (params.status === "done" && params.review)
+          await verifyArtifact(workspace, params.review.commit, true);
+        return result(
           await backend.request(`/tasks/${encodeURIComponent(taskId)}`, "PATCH", params, signal),
-        ),
+        );
+      },
     }),
   ];
 }

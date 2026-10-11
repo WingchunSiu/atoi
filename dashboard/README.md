@@ -5,9 +5,11 @@ that is the main way to read what the team is doing, and a direct line from you 
 orchestrator. It started from [`atoi-dashboard-plan.md`](../atoi-dashboard-plan.md); the
 product changes since then are listed below.
 
-**Status: mock data only.** Nothing here talks to the real backend yet. The UI runs on
-scripted fixtures in the browser and on a local fake backend (`fake-sse`). A run working
-here does not show that the backend, Atlas, Modal or Temporal integration works.
+**Status: connected to the authenticated backend.** The live UI launches an orchestrator,
+shows recorded activity and task evidence, sends team posts or direct operator messages,
+and stops runs. Objective completion leaves the team available for follow-up messages.
+Only explicit Stop or the team deadline ends it. Offline fixtures and an explicitly simulated backend demo remain available.
+A simulated run does not establish Atlas, model, Git or Modal integration.
 
 ## Setup
 
@@ -26,10 +28,20 @@ Copy `.env.example` to `.env` to change defaults:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `VITE_API_TARGET` | `http://localhost:8787` | Where the dev server proxies `/api` |
-| `VITE_DEFAULT_SOURCE` | `mock` | Source used when the URL has no `?source=` |
+| `VITE_API_TARGET` | `http://127.0.0.1:3000` | Where the dev server proxies `/api` |
+| `VITE_DEFAULT_SOURCE` | `live` | Source used when the URL has no `?source=` |
 
 ## Using it
+
+Start `pnpm dev:live`, then `VITE_API_TARGET=http://127.0.0.1:3200 pnpm dev:dashboard`,
+as described in [runtime setup](../docs/runtime.md). The launcher stays up across
+objectives. Do not use `pnpm e2e` as the interactive backend.
+Open the dashboard and enter `ADMIN_TOKEN` (stored in this tab's session storage),
+a configured writable repository and a bounded objective. The orchestrator uses one sandbox
+in addition to the configured worker limit. Closing the tab does not stop cloud compute;
+use **Stop**, or wait for the team deadline. Objective completion keeps the team available. **New run** opens another launch.
+Existing runs can be selected from the top bar.
+
 
 - **Canvas.** Agents sit on a ring around the shared-state hub. A solid line appears between
   two agents once they DM each other. The **you** node is linked to the orchestrator.
@@ -42,6 +54,9 @@ Copy `.env.example` to `.env` to change defaults:
 - **Talking to the orchestrator.** Click **you**, the you–orchestrator line, or **Message
   orchestrator**. Type and press Enter (Shift+Enter for a new line). Your message shows as
   "sending…" until the backend records it and it comes back on the event stream.
+- **Talking to a worker.** Open its agent details and choose **Message implementer/reviewer**
+  (or its configured role). This opens your own DM with that agent; peer-to-peer conversations
+  remain read-only to the operator.
 - **Details.** Click an agent card, a hub count, or **details** (or press 1–3) for the summary,
   tasks, git, and agent detail drawer. Esc closes it.
 
@@ -107,44 +122,50 @@ with [DiceBear](https://www.dicebear.com/) (MIT). DiceBear is a dev dependency o
 | URL | What it shows |
 | --- | --- |
 | `?source=mock&fixture=happy-path` | A scripted fixture streamed like a live run (also `recovery`, `third-worker`, `edge-states`). `&speed=2` plays it faster. A picker in the top bar switches fixtures; reload to restart. |
-| `?source=live` | The newest run from `GET /api/runs`, streamed over SSE |
+| `?source=live` | The newest run from `GET /api/runs`, replayed from authenticated event pages |
 | `?source=live&run=r_8f2` | A specific run |
 
 In mock mode, messages you send get a scripted reply that says it's scripted.
 
-### Fake backend
+### Local API integration demo
 
-`fake-sse` serves a fixture through the same endpoints the real backend will implement, so
-the live path (EventSource, reconnects, `Last-Event-ID`, sending messages) can be tested:
+From the repo root, in separate terminals:
 
 ```bash
-pnpm fake-sse --fixture happy-path --speed 4 --drop-after 30
+pnpm demo:dashboard
+pnpm dev:dashboard
 ```
 
-Then open `http://localhost:5173/?source=live`. `--drop-after N` closes each connection
-after N events to test reconnects. The server marks its run `mock: true`, so the dashboard
-shows the mock strip.
+Use the demo token printed by the first command. This starts the real API and a
+throwaway MongoDB replica set with simulated orchestration and replies. Launch,
+message, refresh to replay, then stop the run. The UI labels the simulation. No
+Temporal worker, cloud sandbox, real model or Git execution runs in this mode.
 
 ## Backend contract
 
-[`src/contract/events.ts`](src/contract/events.ts) holds the event types and zod schemas,
-with no React or app imports so the backend can copy it. Endpoints:
+Vite proxies `/api` to `/operator` on `VITE_API_TARGET`. All requests carry the
+operator Bearer token; no token is put in URLs or bundled environment variables.
+Production hosting needs an equivalent HTTPS reverse proxy. `vite preview` alone
+does not provide a production API proxy.
 
-| Endpoint | Purpose |
+| Endpoint through proxy | Purpose |
 | --- | --- |
-| `GET /api/runs` | `{ runs: { id, objective, status, startedAt, mock? }[] }`, newest first |
-| `GET /api/runs/:runId/events` | SSE: every event after `Last-Event-ID` / `?after=`, then new ones |
-| `POST /api/runs/:runId/messages` | **New.** Body `{ to, body, clientRequestId }`, returns `202 { messageId }` |
+| `GET /api/runs` | Canonical run array, newest first |
+| `POST /api/runs` | Objective, repositoryUrl, workerLimit, lifetimeSeconds and stable requestId |
+| `GET /api/runs/:runId/dashboard-events?after=N` | `{ events, cursor, hasMore }`, replayed/polled from persisted Atlas events |
+| `POST /api/runs/:runId/messages` | `{ requestId, body, recipientId?, mentions: [] }`, returns persisted message |
+| `POST /api/runs/:runId/stop` | Begin cleanup; terminal state waits for confirmation |
 
-Additions to the original plan's contract:
+The cursor advances over raw event sequence numbers, including events not displayed
+by the dashboard. The adapter never infers successful tests or pushes from model prose.
+Task evidence is labeled agent-reported, and task commit references remain distinct
+from recorded pushes. The CLI can inspect complete raw tool results. Custom model
+endpoints report token usage but display **unpriced** for unknown dollar costs.
 
-- `USER_ID = "user"` names the operator. It can appear in `from`/`to` of `message.sent` for
-  the DM with the orchestrator. It is not an agent and gets no inbox.
-- `message.sent` has an optional `clientRequestId`, echoing the id from the POST, so the
-  dashboard can match its "sending…" bubble to the recorded message. Retrying with the same
-  id must not create a duplicate.
-- After a POST, the backend records `message.sent` from `user` plus a `delivery.queued` for
-  the orchestrator, and wakes it like any DM.
+Operator DMs create deliveries and wake the addressed agent; plain team posts are
+readable without waking everyone. Agents can reply to `operator`; the UI displays
+that participant as `you`. Recorded request IDs replace optimistic message bubbles.
+Use fresh runs after upgrading: older histories may lack task/message snapshots.
 
 ## Checks
 
@@ -159,13 +180,12 @@ pnpm build
 ```
 src/contract/events.ts   event types + zod schemas + the send-message request
 src/state/               reduce.ts (pure fold), runStore.ts, chat.ts, selectors.ts
-src/sources/             live SSE source, in-browser mock source, mockRun (shared with fake-sse)
+src/sources/             authenticated live source, in-browser mock source, mockRun
 src/canvas/              geometry, nodes, edges, activity engine + layer
 src/chat/                chat panel and composer
 src/ui/avatars.ts        avatar pool + per-run assignment
 src/inspector/           details drawer: summary, tasks, git, agent detail
 fixtures/                TypeScript fixture builder and the four fixtures
-scripts/fake-sse.ts      local mock backend
 scripts/generate-avatars.ts  regenerates src/assets/avatars
 tests/                   vitest
 ```
@@ -197,7 +217,5 @@ Implementation details:
 
 ## Not done yet
 
-- Connecting to the real backend, including its implementation of the messages endpoint.
-- Screenshots at 1280×720 and 1920×1080 for review. Playwright isn't installed; layouts were
-  checked by hand in a browser.
+- Dedicated layout checks at 1280×720 and 1920×1080; launch/message/replay/stop were checked in Chrome at its current viewport.
 - Reduced motion is unit-tested only; it wasn't checked in a browser with the setting on.

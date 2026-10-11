@@ -9,7 +9,6 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "fake-sse": "tsx scripts/fake-sse.ts",
     "avatars": "tsx scripts/generate-avatars.ts"
   },
   "dependencies": {

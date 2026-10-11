@@ -23,7 +23,12 @@
     "cli": "tsx --env-file=.env src/cli.ts",
     "test:runtime": "vitest run",
     "smoke:modal": "tsx scripts/smoke-modal.ts",
-    "e2e": "tsx --env-file-if-exists=.env scripts/e2e.ts"
+    "e2e": "tsx --env-file-if-exists=.env scripts/e2e.ts",
+    "dev:live": "tsx --env-file=.env scripts/dev-live.ts",
+    "dev:dashboard": "pnpm --filter atoi-dashboard dev",
+    "demo:dashboard": "tsx scripts/demo-dashboard.ts",
+    "build:all": "pnpm build && pnpm --filter atoi-dashboard build",
+    "test:dashboard": "pnpm --filter atoi-dashboard test"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.52",

@@ -15,6 +15,7 @@ type ActivityConfig = Pick<
   | "AGENT_TOKEN_SECRET"
   | "PI_PROVIDER"
   | "PI_MODEL"
+  | "PI_BASE_URL"
   | "TURN_TIMEOUT_MS"
   | "TURN_MODEL_REQUESTS"
   | "TURN_TOOL_CALLS"
@@ -74,6 +75,7 @@ export function createActivities(
               invocationId: invocation._id,
               generation: invocation.generation,
               role: agent.role,
+              kind: agent.kind,
               instructions: agent.instructions,
               prompt: invocation.prompt,
               checkpoint: await store.checkpoint(agent),
@@ -81,6 +83,7 @@ export function createActivities(
               token: agentToken(config.AGENT_TOKEN_SECRET, agentId),
               provider: config.PI_PROVIDER,
               model: config.PI_MODEL,
+              modelBaseUrl: config.PI_BASE_URL,
               budget: {
                 timeoutMs: config.TURN_TIMEOUT_MS,
                 modelRequests: config.TURN_MODEL_REQUESTS,
@@ -115,6 +118,8 @@ export function createActivities(
     },
     async stopAgent(agentId: string): Promise<void> {
       const agent = await store.getAgent(agentId);
+      if (agent.recovery?.provisioningAttempts?.length)
+        throw new Error("Sandbox replacement is still in flight; cleanup unconfirmed");
       if (await store.invocations.findOne({ agentId, "provisioningAttempts.0": { $exists: true } }))
         throw new Error("Sandbox provisioning is still in flight; cleanup unconfirmed");
       if (agent.sandboxId) await modal.stop(agent.sandboxId);
@@ -126,6 +131,36 @@ export function createActivities(
           "Run stopped during invocation; effects may be incomplete",
         );
       await store.confirmCleanup(agentId);
+    },
+    async replaceAgent(agentId: string, requestId: string): Promise<void> {
+      const attempt = await store.beginRecoveryProvisioning(agentId, requestId);
+      if (!attempt) return;
+      const { agent, attemptId } = attempt;
+      try {
+        const run = await store.assertActive(agent.runId);
+        await store.checkpoint(agent);
+        if (agent.sandboxId) await modal.stop(agent.sandboxId);
+        // A retry reuses the deterministic replacement name rather than destroying it.
+        const sandboxId = await modal.create({ ...agent, sandboxId: null }, run);
+        try {
+          await store.finishRecovery(agentId, requestId, sandboxId);
+        } catch (error) {
+          const current = await store.getAgent(agentId);
+          if (
+            current.recovery?.requestId === requestId &&
+            current.recovery.status === "completed" &&
+            current.sandboxId === sandboxId
+          )
+            return;
+          await modal.stop(sandboxId);
+          throw error;
+        }
+      } finally {
+        await store.endRecoveryProvisioning(agentId, requestId, attemptId);
+      }
+    },
+    async failRecovery(agentId: string, requestId: string): Promise<void> {
+      await store.failRecovery(agentId, requestId);
     },
     async failAgent(
       agentId: string,

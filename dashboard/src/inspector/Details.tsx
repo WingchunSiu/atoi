@@ -2,6 +2,7 @@ import { useRunState } from "../app/context";
 import { USER_ID } from "../contract/events";
 import { dmLabel, dmMessages, userDmKey } from "../state/chat";
 import { clock, duration, firstLine, tokens, usd } from "../state/format";
+import { peerKey } from "../state/reduce";
 import { AgentAvatar } from "../ui/AgentAvatar";
 import { AgentChip, AgentStateMarker, SectionTitle, TaskChip } from "../ui/chips";
 import { actions } from "../ui/uiStore";
@@ -40,9 +41,16 @@ export function AgentDetail({ id }: { id: string }) {
           <span className="text-muted">{agent.kind}</span>
         </div>
       </div>
+      <button
+        type="button"
+        className="rounded-box border border-ink px-2 py-1"
+        onClick={() => actions.openChat(peerKey(USER_ID, agent.id))}
+      >
+        Message {agent.role}
+      </button>
       <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-0.5">
         <dt className="text-muted">id</dt>
-        <dd>{agent.id}</dd>
+        <dd className="min-w-0 break-all">{agent.id}</dd>
         <dt className="text-muted">state</dt>
         <dd>
           <AgentStateMarker state={agent.state} />
@@ -205,7 +213,8 @@ export function AgentDetail({ id }: { id: string }) {
       <SectionTitle>usage</SectionTitle>
       <p>
         {tokens(agent.usage.inputTokens)} in, {tokens(agent.usage.outputTokens)} out,{" "}
-        {usd(agent.usage.costUsd)}, active {duration(agent.usage.durationMs)}
+        {agent.usage.costKnown === false ? "unpriced" : usd(agent.usage.costUsd)}, active{" "}
+        {duration(agent.usage.durationMs)}
       </p>
     </div>
   );

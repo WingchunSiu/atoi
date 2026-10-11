@@ -48,7 +48,7 @@ export function Git() {
   const state = useRunState();
   const selected = useUi((u) => u.selectedCommit);
   const commits = Object.values(state.commits).sort((a, b) => b.seq - a.seq);
-  if (!commits.length) return <p className="text-body text-muted">No commits pushed yet.</p>;
+  if (!commits.length) return <p className="text-body text-muted">No commits reported yet.</p>;
   return (
     <ul className="space-y-2">
       {commits.map((c) => (

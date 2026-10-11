@@ -57,9 +57,10 @@ the team and inspecting tasks, evidence and lifecycle events. Retain the CLI for
 smoke checks against the same backend API. Browser sessions never own run lifetime.
 We reuse Pi's model/tool loop.
 
-The first milestone preserves agents across turns and tasks within a run. Run
-completion archives records and checkpoints and stops compute; resuming the same
-team across completed runs is deferred. Distinguish this limit from the long-term
+The first milestone preserves agents across turns, tasks and completed objectives
+within a run. Objective completion records a checkpointed outcome and keeps the
+team available. Explicit Stop or the run deadline stops compute; reopening stopped
+teams is deferred. Distinguish this limit from the long-term
 product goal of persistent teams.
 
 Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
@@ -135,7 +136,7 @@ See [deployment boundaries](docs/deployment.md) for local and hosted topologies.
   does not own infrastructure credentials or enforce its own execution limits.
 - Use run-scoped agent IDs for discovery, channel membership, task ownership and
   routing. Worker limits are configurable and include pending provisioning. Stop
-  or completion must clean up all run sandboxes, including the orchestrator.
+  or deadline expiry must clean up all run sandboxes, including the orchestrator.
 - Run Pi and its filesystem/shell tools inside the assigned Modal sandbox. Keep
   backend execution separate from agent-controlled commands. Restore native Pi
   session entries through SessionManager, not only a copied message array.
@@ -159,8 +160,9 @@ See [deployment boundaries](docs/deployment.md) for local and hosted topologies.
 - Idle workflows wait without holding Pi calls open. Quiesce tools and checkpoint
   before sandbox suspension. Verify Modal lifecycle capabilities and report any
   fallback; do not assume RAM retention or zero idle cost. Keep the Temporal service
-  and worker available for wakeups. Completion waits for the orchestrator's final
-  checkpoint, then drives idempotent cleanup with failures retained for retry.
+  and worker available for wakeups. Objective completion waits for the orchestrator's
+  checkpoint and leaves the team available. Stop/deadline cleanup is idempotent
+  with failures retained for retry.
 - Separate stable agent IDs from sandbox, run and worker IDs. Use worker generations
   and conditional checkpoint updates to reject superseded workers. Stop or isolate
   old execution before replacement; rejecting a database write alone does not stop

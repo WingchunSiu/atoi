@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { repositorySecretsSchema } from "./repositories.js";
 
 const environment = z.object({
   MONGODB_URI: z.string().min(1),
@@ -18,11 +19,12 @@ const environment = z.object({
   MODAL_IMAGE_TAG: z.string().default("node:24-bookworm-slim"),
   MODAL_MODEL_SECRET: z.string().optional(),
   ATOI_MODEL_API_KEY: z.string().optional(),
-  MODAL_GIT_SECRET: z.string().optional(),
+  GITHUB_REPOSITORIES: repositorySecretsSchema,
   PI_PROVIDER: z.string().min(1),
   PI_MODEL: z.string().min(1),
+  PI_BASE_URL: z.url().optional(),
   TURN_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).multipleOf(1000).default(180_000),
-  TURN_MODEL_REQUESTS: z.coerce.number().int().min(1).max(100).default(12),
+  TURN_MODEL_REQUESTS: z.coerce.number().int().min(1).max(100).default(24),
   TURN_TOOL_CALLS: z.coerce.number().int().min(1).max(200).default(40),
 });
 export type Config = z.infer<typeof environment>;

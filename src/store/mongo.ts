@@ -41,6 +41,7 @@ export class MongoStore extends CoordinationStore {
     client: MongoClient,
     db: Db,
     private readonly agentSecret: string,
+    private readonly controlPlaneId?: string,
   ) {
     super(client, db);
   }
@@ -90,6 +91,12 @@ export class MongoStore extends CoordinationStore {
 
   async createRun(input: RunInput): Promise<{ run: Run; agents: Agent[] }> {
     const runId = hash(["run", input.requestId]);
+    const seeds = input.agents ?? [
+      {
+        role: "orchestrator",
+        instructions: `Coordinate the objective with up to ${input.workerLimit ?? 2} workers. Use spawn_agent to assign focused implementation and review roles. Create tasks with acceptance criteria, delegate by DM, and end your turn while waiting. Require a pushed commit and independent exact-commit review. Workers must report task progress to you by DM. Call complete_objective only after all tasks are done; this records the outcome and keeps the team available. On follow-ups reuse existing workers, create fresh tasks, and build on the last reviewed commit. For an empty repository, create an initial commit on a task branch and push it for review; do not assume main or TASK.md exists. Never poll or invent test results.`,
+      },
+    ];
     // Reserve all seed identities/capacity and objective deliveries in one transaction.
     return this.transaction(async (session) => {
       const existing = await this.runs.findOne({ _id: runId }, { session });
@@ -108,9 +115,10 @@ export class MongoStore extends CoordinationStore {
         _id: runId,
         requestHash: fingerprint,
         objective: input.objective,
+        ...(this.controlPlaneId ? { controlPlaneId: this.controlPlaneId } : {}),
         repository: input.repositoryUrl,
-        workerLimit: input.agents.length,
-        workerCount: input.agents.length,
+        workerLimit: input.agents?.length ?? input.workerLimit ?? 2,
+        workerCount: input.agents?.length ?? 0,
         orchestratorId: null,
         status: "active",
         deadline: new Date(Date.now() + input.lifetimeSeconds * 1000),
@@ -130,11 +138,11 @@ export class MongoStore extends CoordinationStore {
         },
         { session },
       );
-      const agents: Agent[] = input.agents.map((seed) => ({
+      const agents: Agent[] = seeds.map((seed) => ({
         _id: randomUUID(),
         runId,
         ...seed,
-        kind: "worker",
+        kind: input.agents ? "worker" : "orchestrator",
         status: "pending",
         runtimeEnabled: true,
         tokenHash: "",
@@ -150,25 +158,46 @@ export class MongoStore extends CoordinationStore {
       for (const agent of agents)
         agent.tokenHash = stringHash(agentToken(this.agentSecret, agent._id));
       await this.agents.insertMany(agents, { session });
-      for (const [i, agent] of agents.entries()) {
-        const messageId = hash([runId, "initial", agent._id]);
-        const deliveryId = hash([messageId, agent._id]);
-        await this.messages.insertOne(
-          {
-            _id: messageId,
-            runId,
-            channelId,
-            senderId: "operator",
-            requestId: `initial_${agent._id}`,
-            fingerprint: hash(input.objective),
-            body: input.objective,
-            mentions: [agent._id],
-            recipients: [agent._id],
-            sequence: i + 1,
-            createdAt: new Date(),
-          },
+      if (!input.agents) {
+        run.orchestratorId = agents[0]!._id;
+        await this.runs.updateOne(
+          { _id: runId },
+          { $set: { orchestratorId: run.orchestratorId } },
           { session },
         );
+      }
+      await this.event(session, { runId, agentId: "operator" }, "run.state", runId, {
+        status: "running",
+        objective: run.objective,
+        repo: run.repository,
+        workerLimit: run.workerLimit,
+        deadline: run.deadline.toISOString(),
+      });
+      for (const [i, agent] of agents.entries()) {
+        await this.event(session, { runId, agentId: agent._id }, "agent.spawned", agent._id, {
+          role: agent.role,
+          kind: agent.kind,
+        });
+        const messageId = hash([runId, "initial", agent._id]);
+        const deliveryId = hash([messageId, agent._id]);
+        const initialMessage = {
+          _id: messageId,
+          runId,
+          channelId,
+          senderId: "operator",
+          requestId: `initial_${agent._id}`,
+          fingerprint: hash(input.objective),
+          body: input.objective,
+          mentions: [agent._id],
+          recipients: [agent._id],
+          sequence: i + 1,
+          createdAt: new Date(),
+        };
+        await this.messages.insertOne(initialMessage, { session });
+        await this.event(session, { runId, agentId: "operator" }, "message.sent", messageId, {
+          message: initialMessage,
+          channelKind: "team",
+        });
         await this.deliveries.insertOne(
           {
             _id: deliveryId,
@@ -182,6 +211,10 @@ export class MongoStore extends CoordinationStore {
           },
           { session },
         );
+        await this.event(session, { runId, agentId: agent._id }, "delivery.queued", deliveryId, {
+          deliveryId,
+          messageId,
+        });
         await this.outbox.insertOne(
           {
             _id: deliveryId,
@@ -204,6 +237,151 @@ export class MongoStore extends CoordinationStore {
       return { run, agents: agents.map(({ tokenHash: _secret, ...agent }) => agent) as Agent[] };
     });
   }
+
+  async spawn(actor: Actor, input: { requestId: string; role: string; instructions: string }) {
+    return this.mutateInvocation(
+      actor.agentId,
+      actor.invocationId!,
+      actor.generation!,
+      async (parent, session) => {
+        if (parent.kind !== "orchestrator")
+          throw new HarnessError(403, "Only the orchestrator can spawn workers");
+        const run = await this.getRun(actor.runId, session);
+        const agentId = hash([actor.runId, "spawn", input.requestId]);
+        const prior = await this.agents.findOne({ _id: agentId }, { session });
+        if (prior) {
+          if (prior.spawnHash !== hash(input)) fail("Spawn request ID reused with different input");
+          const { tokenHash: _token, ...view } = prior;
+          return view;
+        }
+        if ((run.completion && !run.completion.confirmed) || run.workerCount >= run.workerLimit)
+          fail("Worker capacity is exhausted or run is completing");
+        await this.runs.updateOne({ _id: run._id }, { $inc: { workerCount: 1 } }, { session });
+        const agent: Agent = {
+          _id: agentId,
+          runId: run._id,
+          role: input.role,
+          instructions: `${input.instructions}\nWork on a private task branch. Push before submitting for independent review. Report progress and review outcomes to orchestrator ${parent._id} by DM. End your turn while waiting for peers.`,
+          kind: "worker",
+          status: "pending",
+          runtimeEnabled: true,
+          generation: 0,
+          turns: 0,
+          toolEpoch: 0,
+          sandboxId: null,
+          cleanupCompletedAt: null,
+          checkpointId: null,
+          invocationId: null,
+          tokenHash: stringHash(agentToken(this.agentSecret, agentId)),
+          createdAt: new Date(),
+          spawnHash: hash(input),
+        };
+        await this.agents.insertOne(agent, { session });
+        await this.event(session, { runId: run._id, agentId }, "agent.spawned", agentId, {
+          role: agent.role,
+          kind: agent.kind,
+          spawnedBy: parent._id,
+        });
+        const channel = (await this.channels.findOneAndUpdate(
+          { runId: run._id, kind: "team" },
+          { $inc: { nextSequence: 1 } },
+          { session, returnDocument: "after" },
+        ))!;
+        const messageId = hash([agentId, "objective"]);
+        const message = {
+          _id: messageId,
+          runId: run._id,
+          channelId: channel._id,
+          senderId: parent._id,
+          requestId: `seed_${agentId}`,
+          fingerprint: hash(input),
+          body: `${run.objective}\n\nAssignment: ${input.instructions}`,
+          mentions: [agentId],
+          recipients: [agentId],
+          sequence: channel.nextSequence,
+          createdAt: new Date(),
+        };
+        await this.messages.insertOne(message, { session });
+        await this.deliveries.insertOne(
+          {
+            _id: messageId,
+            runId: run._id,
+            recipientId: agentId,
+            messageId,
+            channelId: channel._id,
+            sequence: message.sequence,
+            status: "pending",
+            createdAt: new Date(),
+          },
+          { session },
+        );
+        await this.outbox.insertOne(
+          {
+            _id: messageId,
+            runId: run._id,
+            recipientId: agentId,
+            deliveryId: messageId,
+            kind: "mailbox_wakeup",
+            status: "pending",
+            createdAt: new Date(),
+          },
+          { session },
+        );
+        await this.event(session, actor, "message.sent", messageId, {
+          message,
+          channelKind: "team",
+        });
+        await this.event(session, { runId: run._id, agentId }, "delivery.queued", messageId, {
+          deliveryId: messageId,
+          messageId,
+        });
+        const { tokenHash: _token, ...view } = agent;
+        return view;
+      },
+    );
+  }
+
+  async completeObjective(actor: Actor, input: { commit: string; summary: string }) {
+    return this.mutateInvocation(
+      actor.agentId,
+      actor.invocationId!,
+      actor.generation!,
+      async (agent, session) => {
+        if (agent.kind !== "orchestrator")
+          throw new HarnessError(403, "Only the orchestrator can complete an objective");
+        const run = await this.getRun(actor.runId, session);
+        if (run.completion && !run.completion.confirmed) {
+          if (
+            run.completion.invocationId !== actor.invocationId ||
+            run.completion.commit !== input.commit ||
+            run.completion.summary !== input.summary
+          )
+            fail("Conflicting completion request");
+          return { status: "awaiting_checkpoint" };
+        }
+        const tasks = await this.tasks.find({ runId: actor.runId }, { session }).toArray();
+        if (
+          !tasks.length ||
+          tasks.some(
+            (t) => t.status !== "done" || !t.review || t.review.commit !== t.result?.commit,
+          ) ||
+          !tasks.some((t) => t.result?.commit === input.commit)
+        )
+          fail("All tasks must have independent exact-commit approval, including the final commit");
+        await this.runs.updateOne(
+          { _id: actor.runId },
+          { $set: { completion: { ...input, invocationId: actor.invocationId! } } },
+          { session },
+        );
+        await this.event(session, actor, "run.state", run._id, {
+          status: "completing",
+          finalCommit: input.commit,
+          outcome: input.summary,
+        });
+        return { status: "awaiting_checkpoint" };
+      },
+    );
+  }
   async send(
     runId: string,
     senderId: string,
@@ -222,6 +400,135 @@ export class MongoStore extends CoordinationStore {
       requestId: input.requestId,
       body: input.body,
       mentions: input.mentions,
+    });
+  }
+
+  async requestRecovery(
+    runId: string,
+    agentId: string,
+    input: { requestId: string; commit: string },
+  ) {
+    return this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      if (agent.runId !== runId) throw new HarnessError(404, "Agent not found in run");
+      const run = await this.assertActive(runId, session);
+      if (run.completion && !run.completion.confirmed)
+        fail("Cannot replace a sandbox while checkpointing objective completion");
+      if (agent.recovery?.requestId === input.requestId) {
+        if (agent.recovery.commit !== input.commit)
+          fail("Recovery request ID reused with different commit");
+        return agent.recovery;
+      }
+      if (!agent.checkpointId || agent.invocationId || agent.status !== "idle")
+        fail(
+          "Replacement requires an idle agent with a confirmed checkpoint; inspect interrupted effects separately",
+        );
+      const recovery = { ...input, status: "pending" as const };
+      await this.agents.updateOne(
+        { _id: agentId },
+        { $set: { recovery, status: "needs_inspection" }, $inc: { generation: 1 } },
+        { session },
+      );
+      await this.event(session, { runId, agentId }, "agent.state", agentId, {
+        state: "recovering",
+        generation: agent.generation + 1,
+        detail: "Stopping old sandbox before restoring checkpoint and pushed commit",
+      });
+      return recovery;
+    });
+  }
+
+  async beginRecoveryProvisioning(agentId: string, requestId: string) {
+    return this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      await this.assertActive(agent.runId, session);
+      if (agent.recovery?.requestId !== requestId || agent.recovery.status !== "pending")
+        return null;
+      const attemptId = randomUUID();
+      await this.agents.updateOne(
+        { _id: agentId },
+        {
+          $addToSet: { "recovery.provisioningAttempts": attemptId },
+        },
+        { session },
+      );
+      return { agent, attemptId };
+    });
+  }
+
+  async endRecoveryProvisioning(agentId: string, requestId: string, attemptId: string) {
+    await this.agents.updateOne(
+      { _id: agentId, "recovery.requestId": requestId },
+      {
+        $pull: { "recovery.provisioningAttempts": attemptId },
+      },
+    );
+  }
+
+  async failRecovery(agentId: string, requestId: string) {
+    await this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      if (
+        agent.recovery?.requestId !== requestId ||
+        agent.recovery.status !== "pending" ||
+        agent.status === "stopped"
+      )
+        return;
+      const error =
+        "Sandbox replacement exhausted retries; inspect cloud resources before resuming";
+      await this.agents.updateOne(
+        { _id: agentId },
+        {
+          $set: { "recovery.status": "failed", "recovery.error": error },
+        },
+        { session },
+      );
+      await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+        state: "needs_inspection",
+        generation: agent.generation,
+        detail: error,
+      });
+      await this.event(session, { runId: agent.runId, agentId }, "failure.recorded", requestId, {
+        failureId: `replacement_${requestId}`,
+        scope: "recovery",
+        message: error,
+        resolved: false,
+      });
+    });
+  }
+
+  async finishRecovery(agentId: string, requestId: string, sandboxId: string) {
+    await this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      await this.assertActive(agent.runId, session);
+      if (agent.recovery?.requestId !== requestId || agent.recovery.status !== "pending")
+        fail("Recovery superseded");
+      await this.agents.updateOne(
+        { _id: agentId },
+        { $set: { sandboxId, status: "idle", "recovery.status": "completed" } },
+        { session },
+      );
+      await this.event(session, { runId: agent.runId, agentId }, "sandbox.state", agentId, {
+        state: "running",
+        sandboxId,
+      });
+      await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+        state: "waiting",
+        generation: agent.generation,
+      });
+      await this.outbox.updateOne(
+        { _id: hash(["recovery", requestId, agentId]) },
+        {
+          $setOnInsert: {
+            runId: agent.runId,
+            recipientId: agentId,
+            kind: "mailbox_wakeup",
+            status: "pending",
+            createdAt: new Date(),
+          },
+        },
+        { session, upsert: true },
+      );
     });
   }
   async mutateInvocation<T>(
@@ -287,7 +594,7 @@ export class MongoStore extends CoordinationStore {
         details: { invocationId, payload: input.payload },
         createdAt: new Date(),
       },
-      { session },
+      { session, ignoreUndefined: true },
     );
   }
 
@@ -311,7 +618,14 @@ export class MongoStore extends CoordinationStore {
       const run = await this.assertActive(agent.runId, session);
       const prior = await this.invocations.findOne({ _id: invocationId, agentId }, { session });
       if (prior) return prior;
-      if (agent.status === "needs_inspection" || agent.status === "stopped") return null;
+      if (
+        agent.recovery?.status === "pending" ||
+        agent.recovery?.provisioningAttempts?.length ||
+        agent.status === "needs_inspection" ||
+        agent.status === "stopped" ||
+        (run.completion && !run.completion.confirmed)
+      )
+        return null;
       if (agent.invocationId)
         return this.invocations.findOne({ _id: agent.invocationId }, { session });
       if (agent.turns >= run.maxInvocationsPerAgent) {
@@ -320,6 +634,17 @@ export class MongoStore extends CoordinationStore {
           { $set: { status: "needs_inspection" } },
           { session },
         );
+        await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+          state: "needs_inspection",
+          generation: agent.generation,
+          detail: "Invocation budget exhausted",
+        });
+        await this.event(session, { runId: agent.runId, agentId }, "failure.recorded", agentId, {
+          failureId: `budget_${agentId}`,
+          scope: "invocation",
+          message: "Invocation budget exhausted",
+          resolved: false,
+        });
         return null;
       }
       const deliveries = await this.deliveries
@@ -380,6 +705,11 @@ export class MongoStore extends CoordinationStore {
         },
         session,
       );
+      await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+        state: "running",
+        generation: invocation.generation,
+        invocationId,
+      });
       return invocation;
     });
   }
@@ -438,7 +768,65 @@ export class MongoStore extends CoordinationStore {
         },
         { session },
       );
+      // A plain final answer to an operator DM is a durable chat reply, even when
+      // the model does not explicitly call send_message. Publish atomically with
+      // its checkpoint, and avoid duplicating an explicit reply from this turn.
+      if (result.outcome === "completed" && result.text.trim()) {
+        const deliveries = await this.deliveries
+          .find(
+            { _id: { $in: invocation.deliveryIds }, invocationId: result.invocationId },
+            { session },
+          )
+          .toArray();
+        const operatorMessages = await this.messages
+          .find(
+            { _id: { $in: deliveries.map((d) => d.messageId) }, senderId: "operator" },
+            { session },
+          )
+          .sort({ createdAt: -1 })
+          .toArray();
+        for (const message of operatorMessages) {
+          const channel = await this.channels.findOne(
+            { _id: message.channelId, kind: "dm", participants: "operator" },
+            { session },
+          );
+          if (!channel) continue;
+          const explicitReply = await this.messages.findOne(
+            { channelId: channel._id, senderId: agentId, invocationId: result.invocationId },
+            { session },
+          );
+          if (!explicitReply)
+            await this.sendMessage(
+              {
+                runId: agent.runId,
+                agentId,
+                invocationId: result.invocationId,
+                generation: result.generation,
+              },
+              channel._id,
+              {
+                requestId: `answer_${result.invocationId}`,
+                body:
+                  result.text.length > 32000
+                    ? `${result.text.slice(0, 31900)}\n[Reply truncated; full text is in the execution record.]`
+                    : result.text,
+                mentions: [],
+                replyTo: message._id,
+              },
+              session,
+            );
+          break; // One operator conversation per agent; coalesced DMs get one reply.
+        }
+      }
       const { checkpoint: _checkpoint, ...summary } = result;
+      for (const delivery of await this.deliveries
+        .find({ invocationId: result.invocationId }, { session })
+        .toArray()) {
+        await this.event(session, { runId: agent.runId, agentId }, "delivery.done", delivery._id, {
+          deliveryId: delivery._id,
+          messageId: delivery.messageId,
+        });
+      }
       await this.invocations.updateOne(
         { _id: result.invocationId },
         { $set: { status: "completed", result: summary } },
@@ -482,6 +870,49 @@ export class MongoStore extends CoordinationStore {
         },
         session,
       );
+      const actor = { runId: agent.runId, agentId };
+      if (result.restoredCheckpoint)
+        await this.event(session, actor, "checkpoint", agentId, {
+          action: "restored",
+          version: Math.max(0, result.generation - 1),
+        });
+      await this.event(session, actor, "checkpoint", agentId, {
+        action: "saved",
+        version: result.generation,
+      });
+      await this.event(session, actor, "usage", agentId, {
+        invocationId: result.invocationId,
+        inputTokens: result.usage.input,
+        outputTokens: result.usage.output,
+        costUsd: result.usage.cost,
+        costKnown: result.usage.costKnown,
+        durationMs: result.usage.elapsedMs,
+      });
+      await this.event(session, actor, "agent.state", agentId, {
+        state: result.outcome === "completed" ? "waiting" : "needs_inspection",
+        generation: result.generation,
+      });
+      const run = await this.getRun(agent.runId, session);
+      if (run.completion?.invocationId === result.invocationId) {
+        if (result.outcome !== "completed") {
+          await this.runs.updateOne({ _id: run._id }, { $unset: { completion: "" } }, { session });
+          await this.event(session, actor, "run.state", run._id, {
+            status: "running",
+            outcome: "Completion invocation failed; inspect the orchestrator",
+          });
+        } else {
+          await this.runs.updateOne(
+            { _id: run._id },
+            { $set: { "completion.confirmed": true } },
+            { session },
+          );
+          await this.event(session, actor, "run.state", run._id, {
+            status: "available",
+            finalCommit: run.completion.commit,
+            outcome: run.completion.summary,
+          });
+        }
+      }
     });
   }
 
@@ -523,6 +954,24 @@ export class MongoStore extends CoordinationStore {
         },
         session,
       );
+      if (current)
+        await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+          state: "needs_inspection",
+          generation: agent.generation,
+          detail: error.slice(0, 4000),
+        });
+      await this.event(
+        session,
+        { runId: agent.runId, agentId },
+        "failure.recorded",
+        invocationId ?? agentId,
+        {
+          failureId: invocationId ?? agentId,
+          scope: "invocation",
+          message: error.slice(0, 4000),
+          resolved: false,
+        },
+      );
     });
   }
 
@@ -553,7 +1002,10 @@ export class MongoStore extends CoordinationStore {
     await this.transaction(async (session) => {
       const agent = await this.getAgent(agentId, session);
       const run = await this.getRun(agent.runId, session);
+      if (agent.cleanupCompletedAt) return;
       if (run.status === "active") fail("Cannot confirm cleanup of an active run");
+      if (agent.recovery?.provisioningAttempts?.length)
+        fail("Sandbox replacement is still in flight; cleanup unconfirmed");
       if (
         await this.invocations.findOne(
           { agentId, "provisioningAttempts.0": { $exists: true } },
@@ -570,66 +1022,102 @@ export class MongoStore extends CoordinationStore {
         { runId: agent.runId, cleanupCompletedAt: null },
         { session },
       );
-      if (!remaining)
+      await this.event(session, { runId: agent.runId, agentId }, "agent.state", agentId, {
+        state: "stopped",
+        generation: agent.generation,
+      });
+      if (agent.sandboxId)
+        await this.event(session, { runId: agent.runId, agentId }, "sandbox.state", agentId, {
+          state: "terminated",
+          sandboxId: agent.sandboxId,
+        });
+      if (!remaining) {
         await this.runs.updateOne(
           { _id: agent.runId, status: "stopping" },
           { $set: { status: "stopped" } },
           { session },
         );
+        await this.event(
+          session,
+          { runId: agent.runId, agentId: "operator" },
+          "run.state",
+          run._id,
+          {
+            status: run.completion?.confirmed ? "completed" : "cancelled",
+            finalCommit: run.completion?.confirmed ? run.completion.commit : undefined,
+            outcome: run.completion?.confirmed
+              ? run.completion.summary
+              : "Stopped by operator or deadline",
+          },
+        );
+      }
     });
   }
 
   async bindSandbox(agentId: string, sandboxId: string): Promise<void> {
-    const agent = await this.getAgent(agentId);
-    await this.assertActive(agent.runId);
-    const update = await this.agents.updateOne(
-      { _id: agentId, sandboxId: null, status: { $ne: "stopped" } },
-      { $set: { sandboxId } },
-    );
-    if (!update.modifiedCount && (await this.getAgent(agentId)).sandboxId !== sandboxId)
-      fail("Agent already has a different sandbox binding");
+    return this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      await this.assertActive(agent.runId, session);
+      const update = await this.agents.updateOne(
+        { _id: agentId, sandboxId: null, status: { $ne: "stopped" } },
+        { $set: { sandboxId } },
+        { session },
+      );
+      if (!update.modifiedCount && (await this.getAgent(agentId, session)).sandboxId !== sandboxId)
+        fail("Agent already has a different sandbox binding");
+      if (update.modifiedCount)
+        await this.event(session, { runId: agent.runId, agentId }, "sandbox.state", agentId, {
+          state: "running",
+          sandboxId,
+        });
+    });
   }
 
-  async stopRun(runId: string): Promise<void> {
-    await this.transaction(async (session) => {
-      const run = await this.getRun(runId, session);
-      if (run.status === "stopped") return;
-      await this.runs.updateOne({ _id: runId }, { $set: { status: "stopping" } }, { session });
-      const agents = await this.agents.find({ runId }, { session }).toArray();
-      if (!agents.length)
-        await this.runs.updateOne({ _id: runId }, { $set: { status: "stopped" } }, { session });
-      for (const agent of agents) {
-        if (agent.status === "stopped") continue;
-        await this.agents.updateOne(
-          { _id: agent._id },
-          { $inc: { generation: 1 }, $set: { status: "stopped", cleanupCompletedAt: null } },
-          { session },
-        );
-        await this.recordInvocationEvent(
-          { ...agent, generation: agent.generation + 1 },
-          agent.invocationId ?? "none",
-          {
-            requestId: `stopped_${runId}`,
-            type: "agent_stopped",
-            payload: { status: "stopped" },
-          },
-          session,
-        );
-        await this.outbox.updateOne(
-          { _id: hash(["stop", agent._id]) },
-          {
-            $setOnInsert: {
-              recipientId: agent._id,
-              runId,
-              kind: "stop",
-              status: "pending",
-              createdAt: new Date(),
-              attempts: 0,
-            },
-          },
-          { session, upsert: true },
-        );
-      }
+  async stopRun(runId: string, session?: ClientSession): Promise<void> {
+    if (!session) return this.transaction((active) => this.stopRun(runId, active));
+    const run = await this.getRun(runId, session);
+    if (run.status !== "active") return;
+    await this.runs.updateOne({ _id: runId }, { $set: { status: "stopping" } }, { session });
+    await this.event(session, { runId, agentId: "operator" }, "run.state", runId, {
+      status: "completing",
+      outcome: run.completion?.confirmed
+        ? run.completion.summary
+        : "Stopping; waiting for sandbox cleanup",
     });
+    const agents = await this.agents.find({ runId }, { session }).toArray();
+    if (!agents.length)
+      await this.runs.updateOne({ _id: runId }, { $set: { status: "stopped" } }, { session });
+    for (const agent of agents) {
+      if (agent.status === "stopped") continue;
+      await this.agents.updateOne(
+        { _id: agent._id },
+        { $inc: { generation: 1 }, $set: { status: "stopped", cleanupCompletedAt: null } },
+        { session },
+      );
+      await this.recordInvocationEvent(
+        { ...agent, generation: agent.generation + 1 },
+        agent.invocationId ?? "none",
+        {
+          requestId: `stopped_${runId}`,
+          type: "agent_stopped",
+          payload: { status: "stopped" },
+        },
+        session,
+      );
+      await this.outbox.updateOne(
+        { _id: hash(["stop", agent._id]) },
+        {
+          $setOnInsert: {
+            recipientId: agent._id,
+            runId,
+            kind: "stop",
+            status: "pending",
+            createdAt: new Date(),
+            attempts: 0,
+          },
+        },
+        { session, upsert: true },
+      );
+    }
   }
 }

@@ -1,14 +1,24 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { AlreadyExistsError, ModalClient, NotFoundError, type Sandbox } from "modal";
 import { type WorkerRequest, type WorkerResult, workerResult } from "../contracts/runtime.js";
+import { repositorySecret } from "../repositories.js";
 import type { Agent, Run } from "../store/mongo.js";
+import { initializeGit } from "./git.js";
 
 export interface ModalOptions {
   appName: string;
   imageTag: string;
   modelSecret?: string;
   modelApiKey?: string;
-  gitSecret?: string;
+  repositorySecrets?: Record<string, string>;
+}
+
+// Spawn IDs are SHA-256 strings; adding a prefix to them exceeds Modal's
+// 64-character name limit. Keep one stable name for creation and cleanup.
+export function sandboxName(agentId: string): string {
+  if (agentId.length <= 59) return `atoi-${agentId}`;
+  return `atoi-${createHash("sha256").update(agentId).digest("hex").slice(0, 56)}`;
 }
 
 export class ModalAgents {
@@ -18,12 +28,13 @@ export class ModalAgents {
   ) {}
 
   async create(agent: Agent, run: Run): Promise<string> {
-    if (this.options.gitSecret && new URL(run.repository).hostname !== "github.com")
-      throw new Error("The GitHub token helper accepts only github.com repositories");
+    const gitSecret = this.options.repositorySecrets
+      ? repositorySecret(run.repository, this.options.repositorySecrets)
+      : undefined;
     const app = await this.client.apps.fromName(this.options.appName, {
       createIfMissing: true,
     });
-    const name = `atoi-${agent._id}`;
+    const name = sandboxName(agent._id);
     let sandbox: Sandbox;
     try {
       sandbox = await this.client.sandboxes.fromName(this.options.appName, name);
@@ -44,7 +55,7 @@ export class ModalAgents {
           "RUN cd /opt/atoi && pnpm install --prod --frozen-lockfile --ignore-scripts",
         ]);
       const secrets = await Promise.all(
-        [this.options.modelSecret, this.options.gitSecret]
+        [this.options.modelSecret, gitSecret]
           .filter((item): item is string => Boolean(item))
           .map((secret) => this.client.secrets.fromName(secret)),
       );
@@ -85,9 +96,12 @@ export class ModalAgents {
         [
           "bash",
           "-c",
-          'set -eu; if [ ! -d /workspace/repo/.git ]; then git clone -- "$1" /workspace/repo; fi; git -C /workspace/repo config user.name "atoi agent"; git -C /workspace/repo config user.email "agent@atoi.invalid"',
+          initializeGit,
           "atoi-init",
           run.repository,
+          agent._id,
+          agent.recovery?.status === "pending" ? agent.recovery.commit : "",
+          "/workspace/repo",
         ],
         { timeoutMs: 120_000 },
       );
@@ -175,7 +189,7 @@ export class ModalAgents {
   async stopNamed(agentId: string): Promise<void> {
     let sandbox: Sandbox;
     try {
-      sandbox = await this.client.sandboxes.fromName(this.options.appName, `atoi-${agentId}`);
+      sandbox = await this.client.sandboxes.fromName(this.options.appName, sandboxName(agentId));
     } catch (error) {
       if (error instanceof NotFoundError) return;
       throw error;
