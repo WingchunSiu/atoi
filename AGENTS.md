@@ -7,28 +7,45 @@ Atlas. A team of agents keeps its identity, expertise, conversations, tasks and
 workspace across sessions. Agents can discover and consult peers who have already
 investigated a problem, rather than repeatedly starting from scratch.
 
-Each subagent owns a private VM/sandbox and workspace. Its environment persists
-across tasks: wake, resume, act, checkpoint and pause. Finishing a task does not
-retire the agent or destroy its sandbox. Agent identity, goals, mailboxes, memory
-and recovery checkpoints also live outside the sandbox, so an unavailable guest
-can be replaced explicitly. Persistence does not require an always-running process.
+Each agent owns one Modal cloud sandbox with a private Git clone, dependencies,
+processes and scratch files. A TypeScript worker embeds the Pi coding-agent SDK
+inside that sandbox. Stable identity, messages and Pi session checkpoints persist
+in Atlas outside the sandbox. Finishing a task leaves the agent available for
+follow-up questions. Sandbox replacement restores checkpointed context and pushed
+Git work; uncommitted files and running processes are outside the first milestone's
+recovery guarantee. Verify Modal lifecycle behavior before promising pause/resume.
 
-Use the Pi agent SDK for agent execution, Temporal for durable coordination and
-MongoDB Atlas for control-plane data and memory. Atlas is the database; provision
-guest compute through a separate sandbox provider. Start with one provider that
-supports pause/resume; E2B is the initial candidate, subject to an integration check.
-Use TypeScript for the initial control plane and runtime. Pin SDK versions when
-adding code and verify their actual capabilities rather than assuming integration.
+Use TypeScript, Node.js and Fastify for the coordination backend, the official
+MongoDB Node driver for Atlas, and Modal's SDK for sandbox lifecycle operations.
+The backend manages durable inboxes, task ownership, admission limits and API
+connections. Use the Temporal TypeScript SDK for durable per-agent workflows,
+timers, retries, cancellation and sandbox lifecycle Activities. Run the Temporal
+worker outside agent sandboxes. Pin SDK versions and verify real integrations.
 
-We are building a persistent swarm harness around Pi, not a new model/tool loop.
-The initial demo should prove peer collaboration, knowledge reuse, sleep/wake and
-checkpoint recovery. Keep boundaries clear for other harnesses later. Universal
-compatibility, a new VM platform and a full consumer assistant are outside scope.
+Agents communicate through a Slack-like team channel and peer DMs. Every agent
+can discover peers, create tasks, claim work and update progress. Initial roles
+guide behavior without restricting direct collaboration. The first milestone includes
+an orchestrator agent that assigns roles, spawns workers, seeds tasks, monitors
+progress and assesses completion. The CLI launches the orchestrator with the
+objective and limits; the backend admits provisioning requests and Temporal
+Activities execute them.
 
-Long-term goals may span hours, days or weeks. Treat billions of tokens as a future
-cumulative-history target, not a context-window claim or a demonstrated capability.
-Use bounded active context, evidence-backed memory and independently measured
-progress. See [the architecture](docs/architecture.md) for the proposed design.
+Git is authoritative for shared project files and artifacts. Agents push task
+branches and exchange immutable commit references through messages and tasks.
+Atlas is authoritative for runs, agents, tasks, channels, messages, deliveries,
+session checkpoints and events. Temporal owns durable scheduling and lifecycle
+decisions with its own service and history store; Atlas is not Temporal storage.
+The live task list lives in Atlas, not Git.
+
+The first test uses two workers, an implementer and reviewer, plus the orchestrator
+(three agents total). Support a configurable number of workers from the start,
+with no fixed role slots or pair-specific routing. The team completes a bounded task,
+exchanging durable messages and a Git commit, and recovering checkpointed context
+and pending messages after sandbox replacement and Temporal worker restart.
+Start with a CLI and event log; the React/Vite/Tailwind dashboard comes later.
+We reuse Pi's model/tool loop.
+
+Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
 
 ## Working style
 
@@ -90,29 +107,51 @@ progress. See [the architecture](docs/architecture.md) for the proposed design.
 
 ## Runtime and data correctness
 
-- Give each agent a stable sandbox binding and private workspace. Pause only
-  after execution is quiescent and checkpoints are durable. Configure provider
-  timeout behavior explicitly; do not rely on a default that may destroy the guest.
-- Keep Temporal Workflow code deterministic. Perform Pi, database, sandbox and
-  network operations in Activities. Bound each Pi invocation, heartbeat long work,
-  handle cancellation and checkpoint progress; Activity retries can rerun work.
-- Use one durable workflow identity per agent and serialize its turns. Wait for
-  peer replies and timers in Temporal rather than leaving a guest running to poll.
-  Keep workflow payloads small and Continue-As-New before history limits; preserve
-  pending work and message deduplication across runs.
-- Temporal owns orchestration decisions and timers; Atlas owns agent records,
-  mailboxes, memory and checkpoint references. Use a durable outbox and reconciler
-  across the two systems instead of assuming an atomic cross-system write.
-- Run Pi in a trusted runner initially. Route all guest filesystem/shell tools
-  through sandbox adapters; never accidentally expose the runner's filesystem.
-  Restore native Pi session entries through its SessionManager, not only a copied
-  message array. Archive session epochs rather than loading unlimited history.
-- Separate stable agent IDs from temporary run and worker IDs. Persist pending
-  work, messages and checkpoints so recovery does not depend on process memory.
-- Keep authoritative task state in direct database reads and writes. Use vector
-  search for discovery, not task ownership, permissions or current version checks.
-- Claim work atomically using leases. Reject commits from superseded attempts.
-  Serialize turns that advance the same agent's conversation checkpoint.
+- Run the orchestrator through the same Pi worker runtime as other agents, with
+  additional spawn and completion tools. Reserve stable agent records and worker
+  capacity atomically before provisioning. Deduplicate spawn requests and reconcile
+  partial provisioning failures. Only the trusted control plane holds Modal credentials.
+- Use run-scoped agent IDs for discovery, channel membership, task ownership and
+  routing. Worker limits are configurable and include pending provisioning. Stop
+  or completion must clean up all run sandboxes, including the orchestrator.
+- Run Pi and its filesystem/shell tools inside the assigned Modal sandbox. Keep
+  backend execution separate from agent-controlled commands. Restore native Pi
+  session entries through SessionManager, not only a copied message array.
+- Give each agent, including the orchestrator, one stable Temporal workflow identity.
+  Serialize bounded Pi invocations and wait for messages/timers in workflows rather
+  than sandbox polling. DMs and explicit mentions create actionable deliveries;
+  other group messages remain readable. Enforce channel membership on reads/sends.
+- Keep workflow code deterministic. Put Atlas, Modal and remote Pi operations in
+  Activities with timeouts, bounded retries, cancellation and heartbeats. Keep
+  payloads small; Continue-As-New carries pending references, with deduplication
+  retained in Atlas. Temporal retries alone do not make Pi tool calls durable.
+- Persist messages, addressed deliveries and outbox records together before
+  acknowledging sends. Relay workflow starts and wakeups with stable IDs and
+  retries, and reconcile pending records after restart. Atlas writes and Temporal
+  signals are not one transaction; signals notify, while mailboxes retain the work.
+- Give each invocation a stable ID. On Activity retry, inspect durable invocation
+  state and reuse a confirmed result. Reject overlapping sandbox invocations. Save
+  native Pi state durably, then conditionally publish the checkpoint and acknowledge
+  deliveries together. Mark ambiguous interrupted effects for inspection instead
+  of blindly repeating external commands.
+- Idle workflows wait without holding Pi calls open. Quiesce tools and checkpoint
+  before sandbox suspension. Verify Modal lifecycle capabilities and report any
+  fallback; do not assume RAM retention or zero idle cost. Keep the Temporal service
+  and worker available for wakeups. Completion waits for the orchestrator's final
+  checkpoint, then drives idempotent cleanup with failures retained for retry.
+- Separate stable agent IDs from sandbox, run and worker IDs. Use worker generations
+  and conditional checkpoint updates to reject superseded workers. Stop or isolate
+  old execution before replacement; rejecting a database write alone does not stop
+  a stale process from editing files or pushing Git commits.
+- Recover from confirmed checkpoints and pushed Git revisions. Surface ambiguous
+  interrupted effects for inspection rather than blindly replaying shell commands.
+  Configure sandbox timeouts explicitly and terminate sandboxes when a run stops.
+- Claim tasks with atomic conditional Atlas updates and validate state transitions.
+  Task ownership survives disconnects in the first milestone; operators can
+  explicitly reassign abandoned work. Delivery leases are separate from task
+  ownership. Automatic task reassignment is deferred.
+- Keep authoritative task state in direct database reads and writes. Semantic
+  discovery is deferred and must never determine ownership or current versions.
 - Expect retries and duplicate delivery. Use idempotency keys and deduplication
   for messages and actions where needed; do not promise exactly-once external effects.
 - Keep database transactions short. Never hold a transaction open during a model
@@ -123,10 +162,13 @@ progress. See [the architecture](docs/architecture.md) for the proposed design.
   what a memory applies to, whether it is verified and when it becomes stale.
 - Keep individual agent context and swarm-wide knowledge distinct. A generated
   assertion is not automatically a verified shared fact.
-- Store large artifacts in versioned file/object storage with references and
-  hashes in Atlas. Avoid unbounded arrays in a single document.
-- Isolate concurrent file edits with separate branches or workspaces; integrate
-  results through an explicit verification step.
+- Keep shared project files and artifacts in Git, with repository, path and commit
+  references in Atlas. Publish task results only after the referenced commit is
+  pushed successfully. Bound Atlas documents and store messages/events separately;
+  use chunked storage for session data that exceeds document limits.
+- Isolate edits with a private clone per sandbox and task branches. Review the exact
+  advertised commit and record actual verification results. The first milestone
+  delivers a reviewed branch; automated merging is deferred.
 - Put limits on concurrency, retries, peer-message hops, runtime and model spend.
   Make failures explicit rather than retrying indefinitely.
 - Give goals explicit acceptance criteria, budgets and stop conditions. Record
@@ -138,9 +180,13 @@ progress. See [the architecture](docs/architecture.md) for the proposed design.
 
 - Use explicit schemas and validate external inputs and agent tool arguments.
   Return actionable errors; do not swallow exceptions or silently report success.
-- Keep credentials in the control plane and out of guest workspaces, source
-  control, prompts and logs. Provide configuration through environment variables
-  and a documented example file containing placeholders.
+- Keep Atlas, Modal and Temporal credentials in the trusted control plane. Give
+  sandbox workers only
+  agent-scoped backend credentials and the model/Git access they require. Inject
+  secrets at runtime, keep them out of source control, prompts and logs, and scope
+  Git access to the demo repository. Provide an environment example with placeholders.
+  Pi shares the sandbox with agent-controlled commands; do not claim those commands
+  are isolated from worker credentials without an additional enforced boundary.
 - Record structured events with agent, task, run and causal references. Capture
   actual messages, tool results, artifacts and verification outcomes; UI animations
   must reflect recorded activity.
@@ -163,13 +209,19 @@ progress. See [the architecture](docs/architecture.md) for the proposed design.
 
 ## Hackathon priorities
 
-1. Complete one real task through peer collaboration and verify the outcome.
-2. Pause agents, wake them on new work and reuse their own files and knowledge.
-3. Interrupt a runner and recover unfinished work; separately test sandbox loss.
-4. Show goals, peer messages, evidence, metrics and sandbox states in the UI.
-5. Compare against a simpler baseline when claiming better cost or quality.
+1. Have an orchestrator spawn two real Pi workers in separate Modal sandboxes
+   against one small test fixture; the orchestrator has its own sandbox.
+2. Demonstrate atomic task claiming, persistent group chat and direct peer messages.
+3. Push an implementation commit, fetch it for review and record actual test results.
+4. Verify message/timer wakeups, Temporal worker restart and checkpoint recovery
+   after sandbox replacement. State limits on files, processes and interrupted effects.
+5. Show the handoff, final commit, review outcome and failures in the CLI event log.
 
-Seed a small team and one task domain first. Defer large swarms, autonomous
-topology changes, RL training and production hardening until the core loop works.
-When finishing a task, summarize what changed, how it was checked and what remains
-incomplete.
+Validate claim contention, duplicate requests and checkpoint recovery with focused
+checks, including spawn retry deduplication and concurrent worker-limit enforcement.
+Smoke-test adding a third worker without schema or routing changes. Bound runtime
+and turns, test outbox reconciliation and Activity retry handling, and verify stop
+cleans up all run sandboxes. Defer worker-initiated spawning, automated merging, semantic search, large-swarm load
+testing and the browser dashboard. Compare against a baseline before claiming
+better cost or quality. When finishing a task, summarize what changed, how it was
+checked and what remains incomplete.
