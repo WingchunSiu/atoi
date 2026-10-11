@@ -34,6 +34,12 @@ progress. See [the architecture](docs/architecture.md) for the proposed design.
 
 - Optimize for a working, understandable demo and fast iteration. Prefer the
   smallest complete implementation that proves the intended behavior.
+- Before starting implementation, inspect `git status` and pull the latest changes
+  with `git pull --ff-only` on the relevant tracked branch. Create new feature
+  branches from the updated base branch. When continuing an existing feature
+  branch, fetch and integrate relevant changes from its PR base before coding.
+  Preserve local work; if a fast-forward is blocked, inspect the divergence and
+  resolve it deliberately rather than resetting or discarding changes.
 - Read relevant code and instructions before editing. Preserve unrelated work.
 - Make routine implementation decisions autonomously. Ask only when missing
   information materially changes the product, or an action exceeds the request.
