@@ -409,7 +409,15 @@ try {
       await second.connect();
       const db = second.db(store.db.databaseName);
       const run = await db.collection("runs").findOne({ _id: runId } as never);
-      report.reconnectPersistence = run?.status === "stopped" ? "passed" : "failed";
+      const confirmed = await db.collection("agents").countDocuments({
+        runId,
+        status: "stopped",
+        sandboxId: null,
+        cleanupCompletedAt: { $type: "date" },
+      });
+      report.cleanupConfirmations = confirmed;
+      report.reconnectPersistence =
+        run?.status === "stopped" && confirmed === agents.length ? "passed" : "failed";
       if (report.reconnectPersistence === "failed") {
         report.status = "failed";
         process.exitCode = 1;

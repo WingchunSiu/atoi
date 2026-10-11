@@ -18,6 +18,7 @@ interface Invocation {
   generation: number;
   status: "running" | "completed" | "uncertain";
   deliveryIds: string[];
+  provisioningAttempts: string[];
   prompt: string;
   result?: Omit<WorkerResult, "checkpoint">;
   error?: string;
@@ -141,6 +142,7 @@ export class MongoStore extends CoordinationStore {
         turns: 0,
         toolEpoch: 0,
         sandboxId: null,
+        cleanupCompletedAt: null,
         checkpointId: null,
         invocationId: null,
         createdAt: new Date(),
@@ -334,6 +336,7 @@ export class MongoStore extends CoordinationStore {
         agentId,
         generation: agent.generation + 1,
         status: "running",
+        provisioningAttempts: [],
         deliveryIds: deliveries.map((delivery) => delivery._id),
         prompt: deliveries
           .map((delivery) => {
@@ -482,38 +485,97 @@ export class MongoStore extends CoordinationStore {
     });
   }
 
-  async uncertain(agentId: string, invocationId: string, error: string): Promise<void> {
+  async uncertain(agentId: string, invocationId: string | null, error: string): Promise<void> {
     await this.transaction(async (session) => {
-      const invocation = await this.invocations.findOne(
-        { _id: invocationId, agentId },
-        { session },
-      );
-      if (!invocation || invocation.status === "completed" || invocation.status === "uncertain")
-        return;
       const agent = await this.getAgent(agentId, session);
-      await this.invocations.updateOne(
-        { _id: invocationId },
-        { $set: { status: "uncertain", error: error.slice(0, 4000) } },
-        { session },
-      );
-      await this.agents.updateOne(
-        { _id: agentId, invocationId },
-        { $set: { status: "needs_inspection" } },
-        { session },
-      );
+      const invocation = invocationId
+        ? await this.invocations.findOne({ _id: invocationId, agentId }, { session })
+        : null;
+      if (invocationId && (!invocation || invocation.status !== "running")) return;
+      if (
+        !invocationId &&
+        (agent.invocationId || agent.status === "needs_inspection" || agent.status === "stopped")
+      )
+        return;
+      if (invocation)
+        await this.invocations.updateOne(
+          { _id: invocation._id },
+          { $set: { status: "uncertain", error: error.slice(0, 4000) } },
+          { session },
+        );
+      const current = agent.invocationId === invocationId && agent.status !== "stopped";
+      if (current)
+        await this.agents.updateOne(
+          { _id: agentId, invocationId, status: { $ne: "stopped" } },
+          { $set: { status: "needs_inspection" } },
+          { session },
+        );
       await this.recordInvocationEvent(
-        { ...agent, generation: invocation.generation },
-        invocationId,
+        { ...agent, generation: invocation?.generation ?? agent.generation },
+        invocationId ?? "none",
         {
-          requestId: `uncertain_${invocationId}`,
-          type: "invocation_uncertain",
+          requestId: `uncertain_${invocationId ?? agent.generation}`,
+          type: invocation ? "invocation_uncertain" : "agent_failed",
           payload: {
-            ...(agent.invocationId === invocationId ? { status: "needs_inspection" } : {}),
+            ...(current ? { status: "needs_inspection" } : {}),
             error: error.slice(0, 4000),
           },
         },
         session,
       );
+    });
+  }
+
+  async beginProvisioning(
+    agentId: string,
+    invocationId: string,
+    generation: number,
+  ): Promise<string> {
+    const attemptId = randomUUID();
+    await this.mutateInvocation(agentId, invocationId, generation, async (_agent, session) => {
+      await this.invocations.updateOne(
+        { _id: invocationId, agentId, generation, status: "running" },
+        { $addToSet: { provisioningAttempts: attemptId } },
+        { session },
+      );
+    });
+    return attemptId;
+  }
+
+  async endProvisioning(invocationId: string, attemptId: string): Promise<void> {
+    await this.invocations.updateOne(
+      { _id: invocationId },
+      { $pull: { provisioningAttempts: attemptId } },
+    );
+  }
+
+  async confirmCleanup(agentId: string): Promise<void> {
+    await this.transaction(async (session) => {
+      const agent = await this.getAgent(agentId, session);
+      const run = await this.getRun(agent.runId, session);
+      if (run.status === "active") fail("Cannot confirm cleanup of an active run");
+      if (
+        await this.invocations.findOne(
+          { agentId, "provisioningAttempts.0": { $exists: true } },
+          { session },
+        )
+      )
+        fail("Sandbox provisioning is still in flight; cleanup unconfirmed");
+      await this.agents.updateOne(
+        { _id: agentId, cleanupCompletedAt: null },
+        { $set: { status: "stopped", sandboxId: null, cleanupCompletedAt: new Date() } },
+        { session },
+      );
+      const remaining = await this.agents.countDocuments(
+        { runId: agent.runId, cleanupCompletedAt: null },
+        { session },
+      );
+      if (!remaining)
+        await this.runs.updateOne(
+          { _id: agent.runId, status: "stopping" },
+          { $set: { status: "stopped" } },
+          { session },
+        );
     });
   }
 
@@ -534,11 +596,13 @@ export class MongoStore extends CoordinationStore {
       if (run.status === "stopped") return;
       await this.runs.updateOne({ _id: runId }, { $set: { status: "stopping" } }, { session });
       const agents = await this.agents.find({ runId }, { session }).toArray();
+      if (!agents.length)
+        await this.runs.updateOne({ _id: runId }, { $set: { status: "stopped" } }, { session });
       for (const agent of agents) {
         if (agent.status === "stopped") continue;
         await this.agents.updateOne(
           { _id: agent._id },
-          { $inc: { generation: 1 }, $set: { status: "stopped" } },
+          { $inc: { generation: 1 }, $set: { status: "stopped", cleanupCompletedAt: null } },
           { session },
         );
         await this.recordInvocationEvent(

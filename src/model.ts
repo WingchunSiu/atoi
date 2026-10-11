@@ -22,6 +22,7 @@ export interface Agent {
   turns: number;
   toolEpoch: number;
   sandboxId: string | null;
+  cleanupCompletedAt: Date | null;
   checkpointId: string | null;
   invocationId: string | null;
   tokenHash: string;

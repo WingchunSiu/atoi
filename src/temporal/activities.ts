@@ -46,12 +46,21 @@ export function createActivities(
           return { work: invocation.result?.outcome === "completed" };
         if (!invocation || invocation.status !== "running") return { work: false };
         if (!agent.sandboxId) {
-          const sandboxId = await modal.create(agent, run);
+          const provisioningAttempt = await store.beginProvisioning(
+            agentId,
+            invocation._id,
+            invocation.generation,
+          );
           try {
-            await store.bindSandbox(agentId, sandboxId);
-          } catch (error) {
-            await modal.stop(sandboxId);
-            throw error;
+            const sandboxId = await modal.create(agent, run);
+            try {
+              await store.bindSandbox(agentId, sandboxId);
+            } catch (error) {
+              await modal.stop(sandboxId);
+              throw error;
+            }
+          } finally {
+            await store.endProvisioning(invocation._id, provisioningAttempt);
           }
         }
         agent = await store.getAgent(agentId);
@@ -106,6 +115,8 @@ export function createActivities(
     },
     async stopAgent(agentId: string): Promise<void> {
       const agent = await store.getAgent(agentId);
+      if (await store.invocations.findOne({ agentId, "provisioningAttempts.0": { $exists: true } }))
+        throw new Error("Sandbox provisioning is still in flight; cleanup unconfirmed");
       if (agent.sandboxId) await modal.stop(agent.sandboxId);
       await modal.stopNamed(agentId);
       if (agent.invocationId)
@@ -114,19 +125,29 @@ export function createActivities(
           agent.invocationId,
           "Run stopped during invocation; effects may be incomplete",
         );
-      await store.agents.updateOne(
-        { _id: agentId },
-        { $set: { status: "stopped", sandboxId: null } },
+      await store.confirmCleanup(agentId);
+    },
+    async failAgent(
+      agentId: string,
+      workflowRunId: string,
+      activityId?: string,
+    ): Promise<{ work: boolean }> {
+      if (activityId) {
+        const invocationId = createHash("sha256")
+          .update(`${workflowRunId}:${activityId}`)
+          .digest("hex");
+        const invocation = await store.invocations.findOne({ _id: invocationId, agentId });
+        if (invocation?.status === "completed")
+          return { work: invocation.result?.outcome === "completed" };
+      }
+      const agent = await store.getAgent(agentId);
+      if (agent.status === "stopped") return { work: false };
+      await store.uncertain(
+        agentId,
+        agent.invocationId,
+        "Agent turn Activity exhausted retries; inspect before resuming",
       );
-      const remaining = await store.agents.countDocuments({
-        runId: agent.runId,
-        $or: [{ sandboxId: { $ne: null } }, { status: { $ne: "stopped" } }],
-      });
-      if (!remaining)
-        await store.runs.updateOne(
-          { _id: agent.runId, status: "stopping" },
-          { $set: { status: "stopped" } },
-        );
+      return { work: false };
     },
     async expireRun(runId: string): Promise<void> {
       await store.stopRun(runId);

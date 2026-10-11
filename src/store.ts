@@ -210,6 +210,12 @@ export class CoordinationStore {
     });
   }
   async putAgent(runId: string, id: string, input: NewAgent) {
+    if (input.runtimeEnabled)
+      throw new Problem(
+        400,
+        "invalid_input",
+        "Admin registration is coordination-only; use /operator/runs for runtime agents",
+      );
     return this.transaction(async (session) => {
       const run = await this.activeRun(runId, session);
       const previous = await this.agents.findOne({ _id: id }, { session });
@@ -219,7 +225,7 @@ export class CoordinationStore {
           previous.role !== input.role ||
           previous.kind !== input.kind ||
           previous.instructions !== (input.instructions ?? input.role) ||
-          previous.runtimeEnabled !== (input.runtimeEnabled ?? false) ||
+          previous.runtimeEnabled !== false ||
           previous.tokenHash !== hash(input.token)
         )
           throw conflict("Agent ID already exists with different configuration");
@@ -247,13 +253,14 @@ export class CoordinationStore {
         role: input.role,
         kind: input.kind,
         tokenHash: hash(input.token),
-        status: input.runtimeEnabled ? "pending" : "idle",
+        status: "idle",
         instructions: input.instructions ?? input.role,
-        runtimeEnabled: input.runtimeEnabled ?? false,
+        runtimeEnabled: false,
         generation: 0,
         turns: 0,
         toolEpoch: 0,
         sandboxId: null,
+        cleanupCompletedAt: null,
         checkpointId: null,
         invocationId: null,
         createdAt: new Date(),

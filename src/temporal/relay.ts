@@ -1,4 +1,8 @@
-import { type Client, WorkflowExecutionAlreadyStartedError } from "@temporalio/client";
+import {
+  type Client,
+  WorkflowExecutionAlreadyStartedError,
+  WorkflowNotFoundError,
+} from "@temporalio/client";
 import type { MongoStore } from "../store/mongo.js";
 
 export async function reconcile(
@@ -18,6 +22,37 @@ export async function reconcile(
       });
     } catch (error) {
       if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+    }
+    // A failure-report Activity may itself fail while Atlas is unavailable.
+    // Inspect closed workflows before dispatching any new wakeup for leased work.
+    for (const agent of await store.agents
+      .find({
+        runId: run._id,
+        runtimeEnabled: true,
+        status: { $in: ["pending", "running"] },
+      })
+      .toArray()) {
+      if (
+        !(await store.deliveries.findOne({
+          recipientId: agent._id,
+          status: { $in: ["pending", "processing"] },
+        }))
+      )
+        continue;
+      try {
+        const execution = await client.workflow.getHandle(`agent/${agent._id}`).describe();
+        if (
+          ["FAILED", "CANCELLED", "TERMINATED", "TIMED_OUT"].includes(execution.status.name) ||
+          (execution.status.name === "COMPLETED" && agent.status === "running")
+        )
+          await store.uncertain(
+            agent._id,
+            agent.invocationId,
+            `Agent workflow ${execution.status.name} with outstanding work; inspect before resuming`,
+          );
+      } catch (error) {
+        if (!(error instanceof WorkflowNotFoundError)) throw error;
+      }
     }
   }
   // Acknowledging a cleanup dispatch is not the same as successful termination.
@@ -44,6 +79,7 @@ export async function reconcile(
     try {
       const run = await store.getRun(event.runId);
       if (event.kind === "mailbox_wakeup" && run.status === "active") {
+        if ((await store.getAgent(event.recipientId)).status === "needs_inspection") continue;
         await client.workflow.signalWithStart("agentWorkflow", {
           workflowId: `agent/${event.recipientId}`,
           taskQueue,

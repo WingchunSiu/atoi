@@ -30,6 +30,21 @@ a response is lost. Unconfirmed effects become `needs_inspection`, leaving the
 delivery unacknowledged; shell commands are not blindly replayed. Completed
 invocations commit their checkpoint and delivery acknowledgements together.
 
+Exhausted turn-Activity retries record `needs_inspection`, retain unacknowledged
+work and do not restart the model automatically. The reconciler inspects failed
+workflows if the failure-report Activity could not reach Atlas. A checkpoint
+already committed for the failed Activity is reused rather than falsely marked
+uncertain. Pending wakeups for an agent under inspection stay queued.
+
+Stopping fences execution immediately, but the run stays `stopping` until every
+agent has `cleanupCompletedAt` set by successful bound and named guest cleanup.
+A missing sandbox binding is not proof of termination. Each provisioning attempt
+is recorded before the provider call; one retry cannot clear another in-flight
+attempt. Cleanup waits until all calls and compensating
+terminations settle. A stuck provisioning marker requires inspection; it does not
+report the run as stopped. Failed cleanup workflows remain discoverable for the
+bounded reconciler retries.
+
 ## Setup
 
 Use Node 24+, pnpm 11.19.0, the Temporal CLI, a Modal account/profile and access to the
@@ -125,7 +140,11 @@ coordination tools against scripted model responses. The harness integration tes
 routes a peer question/reply through the real HTTP API, transactional inbox/outbox
 and Temporal, restores prior context, and confirms cleanup using a fixture sandbox.
 Other checks cover claims, duplicate delivery, stale checkpoint rejection,
-confirmed-result reuse, bounded turns and a Temporal worker restart.
+confirmed-result reuse, bounded turns and a Temporal worker restart. Lifecycle
+failure regressions use real MongoDB/Temporal with provider fixtures to exercise
+unbound named guests, failed cleanup retry, provisioning/stop races, overlapping
+provisioning attempts, exhausted turn retries, failed failure reporting, lost
+completion acknowledgement and empty logical runs.
 
 `smoke:modal` creates one temporary real Modal sandbox with a ten-minute maximum,
 uses scripted model/backend fixtures, and terminates it in `finally`. It verifies
@@ -218,4 +237,8 @@ and `sent/kind=wake` outbox records. Do not run that draft against the current
 schema. Use a fresh explicitly named development database for its old test data;
 no automatic migration/reset deletes existing Atlas records. Databases created by
 Ryan's coordination slice also need the new lifecycle/event fields before resuming
-historical runs; use fresh runs for this demo.
+historical runs; use fresh runs for this demo. Cleanup confirmation and in-flight
+provisioning markers are new fields; historical stopped records do not establish
+these new guarantees. The admin registration endpoint accepts only logical
+agents (`runtimeEnabled` omitted or false). Runtime agents are seeded through
+`/operator/runs`, which generates the same scoped credentials used by the guest.

@@ -10,7 +10,9 @@ outbox and sequences Pi invocations using Temporal and Modal; see [runtime setup
 Each run has an immutable objective, repository and worker limit. Agent IDs are
 stable and globally unique; each agent belongs to exactly one run. The operator
 registers logical agents through bootstrap APIs. Registration does not provision a
-sandbox, start a workflow or prove an agent is running. Roles are descriptive; a
+sandbox, start a workflow or prove an agent is running. This endpoint rejects
+`runtimeEnabled: true`; `/operator/runs` creates runtime agents with generated
+credentials matching the trusted runner. Roles are descriptive; a
 worker can contact any peer regardless of role. A run can have one orchestrator,
 which does not consume worker capacity.
 

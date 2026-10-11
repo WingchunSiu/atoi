@@ -25,6 +25,7 @@ const agent: Agent = {
   turns: 0,
   toolEpoch: 0,
   sandboxId: null,
+  cleanupCompletedAt: null,
   checkpointId: null,
   invocationId: null,
 };

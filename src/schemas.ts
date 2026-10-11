@@ -18,7 +18,7 @@ export const AgentInput = Type.Object(
     role: Text(200),
     kind: Type.Union([Type.Literal("orchestrator"), Type.Literal("worker")]),
     instructions: Type.Optional(Text(16000)),
-    runtimeEnabled: Type.Optional(Type.Boolean()),
+    runtimeEnabled: Type.Optional(Type.Literal(false)),
     token: Type.String({ minLength: 32, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$" }),
   },
   Strict,

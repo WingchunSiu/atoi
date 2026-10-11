@@ -1,9 +1,11 @@
 import {
+  ActivityFailure,
   condition,
   continueAsNew,
   defineSignal,
   proxyActivities,
   setHandler,
+  workflowInfo,
 } from "@temporalio/workflow";
 import type { Activities } from "./activities.js";
 
@@ -43,8 +45,21 @@ export async function agentWorkflow(agentId: string, pendingWake = true): Promis
     await condition(() => awake || stopping, "1 minute");
     if (stopping) break;
     awake = false;
-    const result = await activities.turn(agentId);
-    awake ||= result.work;
+    try {
+      const result = await activities.turn(agentId);
+      awake ||= result.work;
+    } catch (error) {
+      if (stopping) break;
+      // A completed Atlas checkpoint wins over a lost Activity acknowledgement.
+      // Unconfirmed work is quarantined; a failed report is reconciled later.
+      const result = await lifecycle.failAgent(
+        agentId,
+        workflowInfo().runId,
+        error instanceof ActivityFailure ? error.activityId : undefined,
+      );
+      if (!result.work) return;
+      awake = true;
+    }
     if (++iterations >= 100) await continueAsNew<typeof agentWorkflow>(agentId, awake);
   }
   await lifecycle.stopAgent(agentId);
