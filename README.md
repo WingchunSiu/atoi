@@ -1,13 +1,24 @@
 # atoi
 
-A persistent swarm harness built around Pi, Modal, Temporal, MongoDB Atlas and Git.
-An orchestrator assigns roles and spawns a configurable team. Peers share a task
-board, communicate in a team channel or DMs, and exchange code through Git commits.
+**Your persistent AI team in the cloud.**
 
-Pi will run inside one Modal sandbox per agent, including the orchestrator.
-Temporal will schedule durable invocations; Atlas stores agent identity, tasks,
-messages and checkpoints. The first full milestone tests an orchestrator plus two
-workers and a smoke check adding a third worker.
+atoi is building a personal team of agents that stays available as your work
+develops. Each agent has its own cloud workspace and session context. Members
+share tasks, conversations and evidence, and can consult the same peers again
+when a new question builds on earlier work. Completing a task leaves its agent
+available for the next conversation.
+
+The technical idea is to organize inference compute across several retained,
+focused contexts. Agents investigate different parts of a problem, do real work
+in their own sandboxes, and exchange the information they need through direct
+messages. See the [product story and inference-scaling thesis](docs/product-story.md).
+
+Code is the first proving ground for this broader product vision. The target
+runtime uses Pi for the model/tool loop, one Modal sandbox per agent, Temporal for
+scheduling, Atlas for coordination and checkpoints, and Git for project artifacts.
+The first full milestone targets an orchestrator plus two workers and a smoke
+check adding a third worker. Team continuity is scoped to a run; reusing the same
+team across completed runs remains future work.
 
 ## Implemented
 
