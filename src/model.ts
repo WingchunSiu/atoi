@@ -2,7 +2,10 @@ import type { NewRun, NewTask, TaskResult } from "./schemas.js";
 
 export interface Run extends NewRun {
   _id: string;
-  status: "active";
+  status: "active" | "stopping" | "stopped";
+  deadline: Date;
+  eventSequence?: number;
+  maxInvocationsPerAgent: number;
   workerCount: number;
   orchestratorId: string | null;
   createdAt: Date;
@@ -12,7 +15,15 @@ export interface Agent {
   runId: string;
   role: string;
   kind: "orchestrator" | "worker";
-  status: "idle";
+  status: "pending" | "idle" | "running" | "needs_inspection" | "stopped";
+  instructions: string;
+  runtimeEnabled: boolean;
+  generation: number;
+  turns: number;
+  toolEpoch: number;
+  sandboxId: string | null;
+  checkpointId: string | null;
+  invocationId: string | null;
   tokenHash: string;
   createdAt: Date;
 }
@@ -54,7 +65,7 @@ export interface Message {
   sequence: number;
   createdAt: Date;
 }
-// Processing/acknowledgement is intentionally reserved for the Temporal invocation slice.
+// Only atomic checkpoint publication acknowledges processed deliveries.
 export interface Delivery {
   _id: string;
   runId: string;
@@ -62,16 +73,20 @@ export interface Delivery {
   messageId: string;
   channelId: string;
   sequence: number;
-  status: "pending";
+  status: "pending" | "processing" | "completed";
+  invocationId?: string;
+  generation?: number;
   createdAt: Date;
 }
 export interface OutboxEvent {
   _id: string;
   runId: string;
   recipientId: string;
-  deliveryId: string;
-  kind: "mailbox_wakeup";
-  status: "pending";
+  deliveryId?: string;
+  kind: "mailbox_wakeup" | "stop";
+  status: "pending" | "sent";
+  attempts?: number;
+  error?: string;
   createdAt: Date;
 }
 export interface AgentEvent {
@@ -82,10 +97,16 @@ export interface AgentEvent {
   entityId: string;
   createdAt: Date;
   details: Record<string, unknown>;
+  sequence: number;
+  generation?: number;
+  sessionId?: string;
+  requestHash?: string;
 }
 export interface Actor {
   agentId: string;
   runId: string;
+  invocationId?: string;
+  generation?: number;
 }
 export class Problem extends Error {
   constructor(

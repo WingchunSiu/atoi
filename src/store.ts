@@ -56,6 +56,11 @@ export class CoordinationStore {
     await this.deliveries.createIndex({ runId: 1, recipientId: 1, status: 1, _id: 1 });
     await this.outbox.createIndex({ status: 1, createdAt: 1 });
     await this.events.createIndex({ runId: 1, createdAt: 1 });
+    await this.events.createIndex(
+      { runId: 1, sequence: 1 },
+      { unique: true, partialFilterExpression: { sequence: { $type: "number" } } },
+    );
+    await this.events.createIndex({ runId: 1, actorId: 1, sequence: 1 });
   }
   async transaction<T>(fn: (session: ClientSession) => Promise<T>): Promise<T> {
     // The driver retries transient transaction errors. A simultaneous idempotent
@@ -86,6 +91,13 @@ export class CoordinationStore {
     entityId: string,
     details: Record<string, unknown> = {},
   ) {
+    const run = requireValue(
+      await this.runs.findOneAndUpdate(
+        { _id: actor.runId },
+        { $inc: { eventSequence: 1 } },
+        { session, returnDocument: "after" },
+      ),
+    );
     await this.events.insertOne(
       {
         _id: randomUUID(),
@@ -94,16 +106,63 @@ export class CoordinationStore {
         kind,
         entityId,
         details,
+        sequence: run.eventSequence!,
+        generation: actor.generation,
         createdAt: new Date(),
       },
       { session },
     );
   }
-  async authenticate(token: string, runId: string): Promise<Actor> {
+  async authenticate(
+    token: string,
+    runId: string,
+    invocation?: { id: string; generation: number },
+  ): Promise<Actor> {
     const agent = await this.agents.findOne({ tokenHash: hash(token), runId });
     if (!agent)
       throw new Problem(401, "unauthorized", "Valid agent credentials for this run are required");
+    if (agent.runtimeEnabled) {
+      if (!invocation) throw conflict("Current invocation credentials are required");
+      if (
+        agent.status !== "running" ||
+        agent.invocationId !== invocation.id ||
+        agent.generation !== invocation.generation
+      )
+        throw conflict("Stale or inactive agent invocation");
+      const actor = {
+        agentId: agent._id,
+        runId,
+        invocationId: invocation.id,
+        generation: invocation.generation,
+      };
+      await this.authorizeActor(actor);
+      return actor;
+    }
     return { agentId: agent._id, runId };
+  }
+  async authorizeActor(actor: Actor, session?: ClientSession) {
+    const run = await this.activeRun(actor.runId, session);
+    if (run.deadline <= new Date()) throw conflict("Run deadline has passed");
+    if (actor.agentId === "operator") return;
+    const agent = requireValue(
+      await this.agents.findOne({ _id: actor.agentId, runId: actor.runId }, { session }),
+    );
+    if (agent.runtimeEnabled) {
+      if (
+        agent.status !== "running" ||
+        !actor.invocationId ||
+        agent.invocationId !== actor.invocationId ||
+        agent.generation !== actor.generation
+      )
+        throw conflict("Stale or inactive agent invocation");
+      // A transactional write conflicts with checkpoint publication or stop/replacement.
+      if (session)
+        await this.agents.updateOne(
+          { _id: agent._id, generation: actor.generation },
+          { $inc: { toolEpoch: 1 } },
+          { session },
+        );
+    }
   }
   async activeRun(runId: string, session?: ClientSession) {
     return requireValue(
@@ -118,7 +177,9 @@ export class CoordinationStore {
         if (
           previous.objective !== input.objective ||
           previous.repository !== input.repository ||
-          previous.workerLimit !== input.workerLimit
+          previous.workerLimit !== input.workerLimit ||
+          previous.lifetimeSeconds !== input.lifetimeSeconds ||
+          previous.maxInvocationsPerAgent !== (input.maxInvocationsPerAgent ?? 20)
         )
           throw conflict("Run ID already exists with different configuration");
         return previous;
@@ -127,6 +188,8 @@ export class CoordinationStore {
         _id: id,
         ...input,
         status: "active",
+        deadline: new Date(Date.now() + (input.lifetimeSeconds ?? 3600) * 1000),
+        maxInvocationsPerAgent: input.maxInvocationsPerAgent ?? 20,
         workerCount: 0,
         orchestratorId: null,
         createdAt: new Date(),
@@ -155,6 +218,8 @@ export class CoordinationStore {
           previous.runId !== runId ||
           previous.role !== input.role ||
           previous.kind !== input.kind ||
+          previous.instructions !== (input.instructions ?? input.role) ||
+          previous.runtimeEnabled !== (input.runtimeEnabled ?? false) ||
           previous.tokenHash !== hash(input.token)
         )
           throw conflict("Agent ID already exists with different configuration");
@@ -182,7 +247,15 @@ export class CoordinationStore {
         role: input.role,
         kind: input.kind,
         tokenHash: hash(input.token),
-        status: "idle",
+        status: input.runtimeEnabled ? "pending" : "idle",
+        instructions: input.instructions ?? input.role,
+        runtimeEnabled: input.runtimeEnabled ?? false,
+        generation: 0,
+        turns: 0,
+        toolEpoch: 0,
+        sandboxId: null,
+        checkpointId: null,
+        invocationId: null,
         createdAt: new Date(),
       };
       await this.agents.insertOne(agent, { session });
@@ -211,6 +284,7 @@ export class CoordinationStore {
     const fingerprint = hash(JSON.stringify(normalized));
     const id = stableId(actor.runId, actor.agentId, "task", input.requestId);
     return this.transaction(async (session) => {
+      await this.authorizeActor(actor, session);
       const existing = await this.tasks.findOne({ _id: id }, { session });
       if (existing) {
         if (existing.fingerprint !== fingerprint)
@@ -252,6 +326,7 @@ export class CoordinationStore {
   }
   async claimTask(actor: Actor, id: string) {
     return this.transaction(async (session) => {
+      await this.authorizeActor(actor, session);
       const task = requireValue(
         await this.tasks.findOne({ _id: id, runId: actor.runId }, { session }),
       );
@@ -278,6 +353,7 @@ export class CoordinationStore {
   }
   async updateTask(actor: Actor, id: string, input: UpdateTask) {
     return this.transaction(async (session) => {
+      await this.authorizeActor(actor, session);
       const task = requireValue(
         await this.tasks.findOne({ _id: id, runId: actor.runId }, { session }),
       );
@@ -367,6 +443,7 @@ export class CoordinationStore {
     const participants = [actor.agentId, peerId].sort();
     const id = stableId(actor.runId, "dm", ...participants);
     return this.transaction(async (session) => {
+      await this.authorizeActor(actor, session);
       requireValue(
         await this.agents.findOne({ _id: peerId, runId: actor.runId }, { session }),
         "Peer not found in this run",
@@ -404,6 +481,7 @@ export class CoordinationStore {
     );
     const id = stableId(actor.runId, actor.agentId, "message", input.requestId);
     return this.transaction(async (session) => {
+      await this.authorizeActor(actor, session);
       const channel = await this.channel(actor, channelId, session);
       const existing = await this.messages.findOne({ _id: id }, { session });
       if (existing) {

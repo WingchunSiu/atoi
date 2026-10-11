@@ -2,9 +2,8 @@
 
 This contract defines the first coordination-service slice. Atlas owns durable
 records and authorization decisions. Agents request changes through authenticated
-HTTP APIs; they do not write the database directly. Temporal will consume the
-outbox and sequence Pi invocations in the next slice. No model, sandbox or Temporal
-execution is implemented here.
+HTTP APIs; they do not write the database directly. The runtime now consumes the
+outbox and sequences Pi invocations using Temporal and Modal; see [runtime setup](runtime.md).
 
 ## Identity and authority
 
@@ -49,8 +48,8 @@ notes and rejection reasons even when the current task result is cleared.
 
 Result commits must be full 40-character SHA-1 commit IDs. Verification text is a
 reported claim, not trusted execution evidence. This service does not fetch Git,
-check that a commit is pushed, or run tests. Those checks belong to the upcoming
-Pi/Git integration. Self-review is disallowed, including for orchestrators.
+check that a commit is pushed, or run tests. Pi can run Git and tests inside each guest, but a trusted evaluator is still
+future work. Self-review is disallowed, including for orchestrators.
 
 ## Channels, messages and actionable deliveries
 
@@ -86,20 +85,21 @@ retrying it in another channel fails instead of sending twice.
 ## Durable execution boundary
 
 The implemented outbox contains pending `mailbox_wakeup` notifications with a
-recipient and delivery ID. The next slice will relay these to
+recipient and delivery ID. The runtime relays these to
 `agent/<agentId>` Temporal workflows. A sent notification will not acknowledge a
 delivery. Failed relay attempts must remain retryable, and periodic reconciliation
 must find pending inbox work even after lost notifications.
 
-Planned delivery transitions are `pending -> processing -> completed`, with a
+Implemented delivery transitions are `pending -> processing -> completed`, with a
 lease and invocation generation on processing. Only checkpoint publication can
 complete a delivery. A failed invocation with ambiguous external effects needs
 inspection instead of automatic command replay. This slice deliberately exposes
 no acknowledgement endpoint that could bypass that checkpoint requirement.
 
-Atlas transactions cannot atomically signal Temporal or push Git. Upcoming code
-must make those boundaries explicit. Do not infer checkpoint recovery or exactly-once
-external effects from the transaction tests in this slice.
+Atlas transactions cannot atomically signal Temporal or push Git. The runtime
+uses a durable outbox and reconciler across Atlas and Temporal. Activity retries
+do not promise exactly-once shell or Git effects; uncertain execution requires
+inspection. See [runtime verification](runtime.md#verification-and-limits).
 
 ## HTTP surface
 
@@ -138,7 +138,9 @@ review permissions, cross-run isolation, duplicate sends, capacity limits,
 transaction rollback and a new backend connection recovering pending messages.
 These establish local database behavior, not an Atlas cloud integration.
 
-The HTTP demo uses synthetic identities and evidence. Temporal relay, leases,
-checkpoint publication, Modal provisioning, Pi execution, agent lifecycle updates,
-task reassignment and the orchestrator's tools remain to be implemented. No
-background consumer drains the inbox or outbox yet.
+The HTTP demo uses synthetic identities and evidence. The runtime implements
+Temporal relay, invocation leases, checkpoint publication, Modal provisioning,
+Pi execution and agent lifecycle updates. It acknowledges inbox work only with a
+durable checkpoint. Task reassignment, the planning orchestrator's tools and
+automated sandbox replacement remain future work. Live Atlas integration is
+still unverified.

@@ -8,6 +8,8 @@ export const RunInput = Type.Object(
     objective: Text(),
     repository: Text(2048),
     workerLimit: Type.Integer({ minimum: 1, maximum: 1000 }),
+    lifetimeSeconds: Type.Optional(Type.Integer({ minimum: 60, maximum: 82800 })),
+    maxInvocationsPerAgent: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
   },
   Strict,
 );
@@ -15,6 +17,8 @@ export const AgentInput = Type.Object(
   {
     role: Text(200),
     kind: Type.Union([Type.Literal("orchestrator"), Type.Literal("worker")]),
+    instructions: Type.Optional(Text(16000)),
+    runtimeEnabled: Type.Optional(Type.Boolean()),
     token: Type.String({ minLength: 32, maxLength: 256, pattern: "^[A-Za-z0-9_-]+$" }),
   },
   Strict,

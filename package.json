@@ -8,27 +8,55 @@
     "node": ">=24.0.0"
   },
   "scripts": {
-    "dev": "node --env-file-if-exists=.env --import tsx src/server.ts",
-    "build": "tsc -p tsconfig.build.json",
-    "start": "node --env-file-if-exists=.env dist/server.js",
-    "check": "tsc --noEmit && biome check .",
+    "dev": "tsx --env-file=.env src/api/main.ts",
+    "build": "tsc -p tsconfig.build.json && node scripts/build-agent.mjs && vite build --config web/vite.config.ts web",
+    "start": "node --env-file-if-exists=.env dist/api/main.js",
+    "check": "tsc --noEmit && biome check . && tsc -p web/tsconfig.json --noEmit",
     "format": "biome check --write .",
-    "test": "node --import tsx --test test/*.test.ts",
+    "test": "node --import tsx --test test/*.test.ts && vitest run",
     "demo": "node --env-file-if-exists=.env --import tsx scripts/demo.ts",
     "test:unit": "node --import tsx --test test/validation.test.ts",
     "test:integration": "node --import tsx --test test/coordination.test.ts",
-    "db:local": "node --import tsx scripts/local-mongo.ts"
+    "db:local": "node --import tsx scripts/local-mongo.ts",
+    "dev:api": "tsx --env-file=.env src/api/main.ts",
+    "dev:worker": "tsx --env-file=.env src/temporal/main.ts",
+    "cli": "tsx --env-file=.env src/cli.ts",
+    "test:runtime": "vitest run",
+    "smoke:modal": "tsx scripts/smoke-modal.ts",
+    "dev:web": "vite --config web/vite.config.ts web",
+    "build:web": "vite build --config web/vite.config.ts web",
+    "demo:activity": "tsx scripts/activity-demo.ts",
+    "e2e": "tsx --env-file-if-exists=.env scripts/e2e.ts"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.52",
     "fastify": "5.12.5",
-    "mongodb": "7.7.0"
+    "mongodb": "7.7.0",
+    "@earendil-works/pi-ai": "1.1.0",
+    "@earendil-works/pi-coding-agent": "1.1.0",
+    "@temporalio/activity": "1.24.0",
+    "@temporalio/client": "1.24.0",
+    "@temporalio/worker": "1.24.0",
+    "@temporalio/workflow": "1.24.0",
+    "modal": "0.11.0",
+    "zod": "4.6.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
     "@types/node": "26.6.5",
     "mongodb-memory-server-core": "11.3.0",
     "tsx": "4.23.15",
-    "typescript": "7.0.2"
+    "typescript": "7.0.2",
+    "@temporalio/testing": "1.24.0",
+    "esbuild": "0.28.2",
+    "prettier": "3.9.10",
+    "vitest": "5.0.3",
+    "@tailwindcss/vite": "4.3.3",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "tailwindcss": "4.3.3",
+    "vite": "8.3.4"
   }
 }
