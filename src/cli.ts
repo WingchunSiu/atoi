@@ -42,27 +42,16 @@ let body: unknown;
 let method = "GET";
 switch (command) {
   case "start": {
-    const [repositoryUrl, objective] = args;
+    const [repositoryUrl, objective, workerLimit = "2"] = args;
     if (!repositoryUrl || !objective)
-      throw new Error('Usage: pnpm cli start <https-git-url> "objective"');
+      throw new Error('Usage: pnpm cli start <https-git-url> "objective" [workerLimit=2]');
     endpoint = "/operator/runs";
     method = "POST";
     body = {
       requestId: randomUUID(),
-      repositoryUrl,
+      repositoryUrl: repositoryUrl === "-" ? undefined : repositoryUrl,
       objective,
-      agents: [
-        {
-          role: "implementer",
-          instructions:
-            "Implement the objective, push a task branch and ask a reviewer to verify its exact commit.",
-        },
-        {
-          role: "reviewer",
-          instructions:
-            "Inspect the project, consult the implementer and independently verify the advertised commit.",
-        },
-      ],
+      workerLimit: Number(workerLimit),
     };
     break;
   }

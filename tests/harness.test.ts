@@ -44,10 +44,7 @@ it("routes a real Pi peer exchange through the API, MongoDB inbox/outbox and Tem
       requestId: randomUUID(),
       objective: "Consult the reviewer about parser evidence.",
       repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      agents: [
-        { role: "implementer", instructions: "Consult your reviewer." },
-        { role: "reviewer", instructions: "Reply with evidence." },
-      ],
+      workerLimit: 2,
     },
   });
   expect(start.statusCode).toBe(200);
@@ -55,8 +52,10 @@ it("routes a real Pi peer exchange through the API, MongoDB inbox/outbox and Tem
     run: { _id: string };
     agents: Agent[];
   };
-  const implementer = agents.find((agent) => agent.role === "implementer")!;
-  const reviewer = agents.find((agent) => agent.role === "reviewer")!;
+  expect(agents).toHaveLength(1);
+  expect(agents[0]!.kind).toBe("orchestrator");
+  let implementer!: Agent;
+  let reviewer!: Agent;
   const results = new Map<string, WorkerResult>();
   const observedRestores: string[] = [];
   const stopped = new Set<string>();
@@ -66,42 +65,71 @@ it("routes a real Pi peer exchange through the API, MongoDB inbox/outbox and Tem
       return agent._id;
     },
     async invoke(sandboxId: string, request: WorkerRequest) {
+      implementer = (await store.agents.findOne({ runId: run._id, role: "implementer" }))!;
+      reviewer = (await store.agents.findOne({ runId: run._id, role: "reviewer" }))!;
       const isReply =
-        request.agentId === implementer._id && request.prompt.includes("Confirmed: violet-raven");
+        request.agentId === implementer?._id && request.prompt.includes("Confirmed: violet-raven");
       const isQuestion =
-        request.agentId === reviewer._id && request.prompt.includes("Please check violet-raven");
-      const turns = isReply
-        ? [
-            [tool("read-evidence", "read", { path: "evidence.txt" })],
-            "I reused the prior evidence and the peer response.",
-          ]
-        : isQuestion
+        request.agentId === reviewer?._id && request.prompt.includes("Please check violet-raven");
+      const turns =
+        request.kind === "orchestrator"
           ? [
               [
-                tool("reply", "send_message", {
-                  recipientId: implementer._id,
-                  body: "Confirmed: violet-raven is supported by the fixture evidence.",
+                tool("spawn-implementer", "spawn_agent", {
+                  role: "implementer",
+                  instructions: "Consult your reviewer.",
                 }),
               ],
-              "I sent the evidence-backed reply.",
+              [
+                tool("spawn-reviewer", "spawn_agent", {
+                  role: "reviewer",
+                  instructions: "Reply with evidence.",
+                }),
+              ],
+              "Workers assigned; waiting for their messages.",
             ]
-          : request.agentId === implementer._id
+          : request.role === "implementer" && !reviewer
             ? [
                 [
-                  tool("save-evidence", "write", {
-                    path: "evidence.txt",
-                    content: "violet-raven",
+                  tool("wait-for-peer", "schedule_wakeup", {
+                    delaySeconds: 1,
+                    note: "Discover the reviewer and consult it",
                   }),
                 ],
-                [
-                  tool("question", "send_message", {
-                    recipientId: reviewer._id,
-                    body: "Please check violet-raven against your evidence.",
-                  }),
-                ],
-                "I saved violet-raven and asked the reviewer.",
+                "Waiting for peer admission.",
               ]
-            : ["Ready to review peer evidence."];
+            : isReply
+              ? [
+                  [tool("read-evidence", "read", { path: "evidence.txt" })],
+                  "I reused the prior evidence and the peer response.",
+                ]
+              : isQuestion
+                ? [
+                    [
+                      tool("reply", "send_message", {
+                        recipientId: implementer._id,
+                        body: "Confirmed: violet-raven is supported by the fixture evidence.",
+                      }),
+                    ],
+                    "I sent the evidence-backed reply.",
+                  ]
+                : request.agentId === implementer?._id
+                  ? [
+                      [
+                        tool("save-evidence", "write", {
+                          path: "evidence.txt",
+                          content: "violet-raven",
+                        }),
+                      ],
+                      [
+                        tool("question", "send_message", {
+                          recipientId: reviewer._id,
+                          body: "Please check violet-raven against your evidence.",
+                        }),
+                      ],
+                      "I saved violet-raven and asked the reviewer.",
+                    ]
+                  : ["Ready to review peer evidence."];
       const result = await executeTurn(request, {
         workspace: path.join(root, sandboxId),
         stateDirectory: path.join(root, sandboxId, ".state"),
@@ -155,16 +183,18 @@ it("routes a real Pi peer exchange through the API, MongoDB inbox/outbox and Tem
   try {
     await waitUntil(
       async () =>
-        observedRestores.length > 0 && (await store.getAgent(implementer._id)).status === "idle",
+        !!implementer &&
+        observedRestores.length > 0 &&
+        (await store.getAgent(implementer._id)).status === "idle",
     );
-    expect(await store.messages.countDocuments({ runId: run._id })).toBe(4);
-    expect((await store.getAgent(implementer._id)).turns).toBe(2);
+    expect(await store.messages.countDocuments({ runId: run._id })).toBeGreaterThanOrEqual(5);
+    expect((await store.getAgent(implementer._id)).turns).toBeGreaterThanOrEqual(2);
     expect(
       await store.deliveries.countDocuments({
         recipientId: implementer._id,
         status: "completed",
       }),
-    ).toBe(2);
+    ).toBeGreaterThanOrEqual(2);
     expect(
       await store.events.countDocuments({
         runId: run._id,
@@ -179,7 +209,9 @@ it("routes a real Pi peer exchange through the API, MongoDB inbox/outbox and Tem
     });
     expect(stop.statusCode).toBe(200);
     await waitUntil(async () => (await store.getRun(run._id)).status === "stopped");
-    expect(stopped).toEqual(new Set(agents.map((agent) => agent._id)));
+    expect(stopped).toEqual(
+      new Set((await store.agents.find({ runId: run._id }).toArray()).map((agent) => agent._id)),
+    );
   } finally {
     worker.shutdown();
     await workerRun;

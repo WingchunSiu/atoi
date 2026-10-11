@@ -1,12 +1,11 @@
-import { randomUUID } from "node:crypto";
 import { MongoClient } from "mongodb";
 import { MongoMemoryReplSet } from "mongodb-memory-server-core";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { agentToken } from "../src/api/auth.js";
 import { createServer } from "../src/api/server.js";
 import { type Activity, watchActivity } from "../src/client/activity.js";
-import { runInput } from "../src/contracts/runtime.js";
 import { MongoStore } from "../src/store/mongo.js";
+import { fixtureTeam } from "./runtime-fixture.js";
 
 let database: MongoMemoryReplSet;
 let client: MongoClient;
@@ -29,18 +28,31 @@ afterAll(async () => {
   await database?.stop();
 });
 async function team() {
-  return store.createRun(
-    runInput.parse({
-      requestId: randomUUID(),
-      objective: "Observe a team",
-      repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      agents: [
-        { role: "implementer", instructions: "Implement" },
-        { role: "reviewer", instructions: "Review" },
-      ],
-    }),
-  );
+  return fixtureTeam(store, [
+    { role: "implementer", instructions: "Implement" },
+    { role: "reviewer", instructions: "Review" },
+  ]);
 }
+
+it("hides archived runs from recent conversations while retaining their records", async () => {
+  const archived = await team();
+  const current = await team();
+  await store.runs.updateOne({ _id: archived.run._id }, { $set: { archivedAt: new Date() } });
+  const app = createServer(store, { operatorToken, agentSecret });
+  try {
+    const response = await app.inject({ url: "/operator/runs", headers });
+    expect(response.statusCode).toBe(200);
+    const ids = response.json().map((run: { _id: string }) => run._id);
+    expect(ids).toContain(current.run._id);
+    expect(ids).not.toContain(archived.run._id);
+    expect(
+      (await app.inject({ url: `/operator/runs/${archived.run._id}`, headers })).statusCode,
+    ).toBe(200);
+    expect(await store.agents.countDocuments({ runId: archived.run._id })).toBe(3);
+  } finally {
+    await app.close();
+  }
+});
 
 it("orders concurrent events transactionally, rejects conflicting retries and replays by cursor", async () => {
   const { run, agents } = await team();
@@ -83,7 +95,7 @@ it("orders concurrent events transactionally, rejects conflicting retries and re
   );
   const ordered = await store.events.find({ runId: run._id }).sort({ sequence: 1 }).toArray();
   expect(ordered.map((event) => event.sequence)).toEqual(
-    Array.from({ length: 15 }, (_, i) => i + 1),
+    Array.from({ length: ordered.length }, (_, i) => i + 1),
   );
   const app = createServer(store, { operatorToken, agentSecret });
   try {

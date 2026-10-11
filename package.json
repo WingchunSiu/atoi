@@ -23,7 +23,8 @@
     "cli": "tsx --env-file=.env src/cli.ts",
     "test:runtime": "vitest run",
     "smoke:modal": "tsx scripts/smoke-modal.ts",
-    "e2e": "tsx --env-file-if-exists=.env scripts/e2e.ts"
+    "e2e": "tsx --env-file-if-exists=.env scripts/e2e.ts",
+    "demo:web": "tsx --env-file=.env scripts/demo-web.ts"
   },
   "dependencies": {
     "@sinclair/typebox": "0.34.52",

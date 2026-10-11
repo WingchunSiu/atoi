@@ -58,6 +58,12 @@ export class RunStore {
     this.schedule();
   }
 
+  // Authoritative snapshots update current state without creating activity animations.
+  hydrate(state: RunState) {
+    this.snap = { ...this.snap, state };
+    this.schedule();
+  }
+
   markSkipped() {
     this.snap = { ...this.snap, skipped: this.snap.skipped + 1 };
     this.schedule();

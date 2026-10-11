@@ -44,7 +44,9 @@ export class ActivityReporter {
       if (this.failure) throw this.failure;
       for (let attempt = 0; ; attempt++) {
         try {
-          await this.backend.request("/events", "POST", body, AbortSignal.timeout(3000));
+          // Atlas transactions plus a development tunnel can exceed three seconds.
+          // Keep retries bounded while allowing ordinary cloud round trips.
+          await this.backend.request("/events", "POST", body, AbortSignal.timeout(10000));
           return;
         } catch (error) {
           // A lost acknowledgement retries the exact event ID, never the Pi tool.

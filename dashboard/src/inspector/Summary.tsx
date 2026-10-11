@@ -123,11 +123,13 @@ export function Summary() {
       ))}
 
       <SectionTitle>result</SectionTitle>
-      {result.finalCommit ? (
+      {result.finalCommit || result.outcome ? (
         <div className="space-y-1 text-body">
-          <div>
-            final commit <CommitChip commit={result.finalCommit} />
-          </div>
+          {result.finalCommit && (
+            <div>
+              final commit <CommitChip commit={result.finalCommit} />
+            </div>
+          )}
           {result.outcome && (
             <p className="font-sans">
               <RichText text={result.outcome} />

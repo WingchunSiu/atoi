@@ -1,10 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
 import { type ClientSession, type Db, type MongoClient } from "mongodb";
+import { ORCHESTRATOR_INSTRUCTIONS } from "../agent/prompts.js";
 import { agentToken } from "../api/auth.js";
 import {
+  type FinishInput,
   HarnessError,
   type RunInput,
   type SendInput,
+  type SpawnInput,
   type WorkerResult,
 } from "../contracts/runtime.js";
 import type { Actor, Agent, Run } from "../model.js";
@@ -41,19 +44,21 @@ export class MongoStore extends CoordinationStore {
     client: MongoClient,
     db: Db,
     private readonly agentSecret: string,
+    collectionPrefix = "",
   ) {
-    super(client, db);
+    super(client, db, collectionPrefix);
   }
   get invocations() {
-    return this.db.collection<Invocation>("invocations");
+    return this.db.collection<Invocation>(`${this.collectionPrefix}invocations`);
   }
   get checkpoints() {
-    return this.db.collection<Checkpoint>("session_checkpoints");
+    return this.db.collection<Checkpoint>(`${this.collectionPrefix}session_checkpoints`);
   }
   override async initialize() {
     await super.initialize();
     await this.invocations.createIndex({ agentId: 1, createdAt: 1 });
     await this.checkpoints.createIndex({ agentId: 1 });
+    await this.wakeups.createIndex({ agentId: 1, status: 1, wakeAt: 1 });
   }
   async getAgent(agentId: string, session?: ClientSession): Promise<Agent> {
     const agent = await this.agents.findOne({ _id: agentId }, { session });
@@ -64,6 +69,28 @@ export class MongoStore extends CoordinationStore {
     const run = await this.runs.findOne({ _id: runId }, { session });
     if (!run) throw new HarnessError(404, "Run not found");
     return run;
+  }
+  override async event(
+    session: ClientSession,
+    actor: Actor,
+    kind: string,
+    entityId: string,
+    details: Record<string, unknown> = {},
+  ) {
+    await super.event(session, actor, kind, entityId, details);
+    if (kind !== "task.updated" || !["in_review", "done", "blocked"].includes(String(details.to)))
+      return;
+    const run = await this.getRun(actor.runId, session);
+    if (run.status !== "active" || !run.orchestratorId || actor.agentId === run.orchestratorId)
+      return;
+    await this.enqueueMessage(
+      session,
+      run._id,
+      "harness",
+      run.orchestratorId,
+      `Task ${entityId} changed to ${details.to} by ${actor.agentId}. Read list_tasks for authoritative state and evidence.`,
+      `task_${entityId}_${details.version}`,
+    );
   }
   async assertActive(runId: string, session?: ClientSession): Promise<Run> {
     const run = await this.getRun(runId, session);
@@ -84,13 +111,167 @@ export class MongoStore extends CoordinationStore {
       agent.invocationId !== invocationId
     )
       fail("Stale or inactive agent invocation");
-    await this.assertActive(agent.runId, session);
+    const run = await this.getRun(agent.runId, session);
+    const finishing =
+      run.status === "completing" &&
+      run.orchestratorId === agentId &&
+      run.completion?.invocationId === invocationId &&
+      run.completion.generation === generation;
+    if ((!finishing && run.status !== "active") || run.deadline <= new Date())
+      fail("Run is stopped or its deadline has passed");
     return agent;
   }
 
-  async createRun(input: RunInput): Promise<{ run: Run; agents: Agent[] }> {
+  private newAgent(
+    runId: string,
+    agentId: string,
+    kind: Agent["kind"],
+    role: string,
+    instructions: string,
+  ): Agent {
+    return {
+      _id: agentId,
+      runId,
+      kind,
+      role,
+      instructions,
+      status: "pending",
+      runtimeEnabled: true,
+      tokenHash: stringHash(agentToken(this.agentSecret, agentId)),
+      generation: 0,
+      turns: 0,
+      toolEpoch: 0,
+      sandboxId: null,
+      cleanupCompletedAt: null,
+      checkpointId: null,
+      invocationId: null,
+      createdAt: new Date(),
+    };
+  }
+
+  private publicAgent({ tokenHash: _secret, ...agent }: Agent) {
+    return agent;
+  }
+
+  private async queueAction(
+    session: ClientSession,
+    runId: string,
+    recipientId: string,
+    kind: "run_start" | "agent_start" | "run_completion",
+    key: string,
+  ) {
+    await this.outbox.updateOne(
+      { _id: hash([kind, key]) },
+      {
+        $setOnInsert: {
+          runId,
+          recipientId,
+          kind,
+          status: "pending",
+          attempts: 0,
+          createdAt: new Date(),
+        },
+      },
+      { session, upsert: true },
+    );
+  }
+
+  private async seedAgent(session: ClientSession, agent: Agent, senderId: string, body: string) {
+    await this.agents.insertOne(agent, { session });
+    await this.channels.updateOne(
+      { runId: agent.runId, kind: "team" },
+      { $addToSet: { participants: agent._id } },
+      { session },
+    );
+    await this.enqueueMessage(
+      session,
+      agent.runId,
+      senderId,
+      agent._id,
+      body,
+      `initial_${agent._id}`,
+    );
+    await this.queueAction(session, agent.runId, agent._id, "agent_start", agent._id);
+    await this.event(
+      session,
+      { runId: agent.runId, agentId: senderId },
+      "agent.spawned",
+      agent._id,
+      {
+        agent: this.publicAgent(agent),
+        spawnedBy: senderId,
+      },
+    );
+  }
+
+  // Internal harness notifications share the same durable message/delivery/outbox boundary.
+  private async enqueueMessage(
+    session: ClientSession,
+    runId: string,
+    senderId: string,
+    recipientId: string,
+    body: string,
+    requestId: string,
+  ) {
+    const messageId = hash([runId, senderId, requestId]);
+    if (await this.messages.findOne({ _id: messageId }, { session })) return;
+    const channel = await this.channels.findOneAndUpdate(
+      { runId, kind: "team" },
+      { $inc: { nextSequence: 1 } },
+      { session, returnDocument: "after" },
+    );
+    if (!channel) throw new HarnessError(404, "Team channel not found");
+    await this.messages.insertOne(
+      {
+        _id: messageId,
+        runId,
+        channelId: channel._id,
+        senderId,
+        requestId,
+        fingerprint: hash(body),
+        body,
+        mentions: [recipientId],
+        recipients: [recipientId],
+        sequence: channel.nextSequence,
+        createdAt: new Date(),
+      },
+      { session },
+    );
+    const deliveryId = hash([messageId, recipientId]);
+    await this.deliveries.insertOne(
+      {
+        _id: deliveryId,
+        runId,
+        channelId: channel._id,
+        recipientId,
+        messageId,
+        sequence: channel.nextSequence,
+        status: "pending",
+        createdAt: new Date(),
+      },
+      { session },
+    );
+    await this.outbox.insertOne(
+      {
+        _id: deliveryId,
+        runId,
+        recipientId,
+        deliveryId,
+        kind: "mailbox_wakeup",
+        status: "pending",
+        attempts: 0,
+        createdAt: new Date(),
+      },
+      { session },
+    );
+    await this.event(session, { runId, agentId: senderId }, "message.sent", messageId, {
+      channelId: channel._id,
+      recipientIds: [recipientId],
+    });
+  }
+
+  async createRun(input: RunInput) {
     const runId = hash(["run", input.requestId]);
-    // Reserve all seed identities/capacity and objective deliveries in one transaction.
     return this.transaction(async (session) => {
       const existing = await this.runs.findOne({ _id: runId }, { session });
       const fingerprint = hash(input);
@@ -104,106 +285,208 @@ export class MongoStore extends CoordinationStore {
             .toArray(),
         };
       }
+      const orchestratorId = hash([runId, "orchestrator"]);
       const run: Run & { requestHash: string } = {
         _id: runId,
         requestHash: fingerprint,
         objective: input.objective,
-        repository: input.repositoryUrl,
-        workerLimit: input.agents.length,
-        workerCount: input.agents.length,
-        orchestratorId: null,
+        ...(input.repositoryUrl ? { repository: input.repositoryUrl } : {}),
+        workerLimit: input.workerLimit,
+        workerCount: 0,
+        orchestratorId,
         status: "active",
         deadline: new Date(Date.now() + input.lifetimeSeconds * 1000),
         maxInvocationsPerAgent: input.maxInvocationsPerAgent,
         createdAt: new Date(),
       };
       await this.runs.insertOne(run, { session });
-      const channelId = hash([runId, "team"]);
       await this.channels.insertOne(
         {
-          _id: channelId,
+          _id: hash([runId, "team"]),
           runId,
           kind: "team",
-          participants: [],
+          participants: ["operator"],
           nextSequence: 0,
           createdAt: new Date(),
         },
         { session },
       );
-      const agents: Agent[] = input.agents.map((seed) => ({
-        _id: randomUUID(),
+      const agent = this.newAgent(
         runId,
-        ...seed,
-        kind: "worker",
-        status: "pending",
-        runtimeEnabled: true,
-        tokenHash: "",
-        generation: 0,
-        turns: 0,
-        toolEpoch: 0,
-        sandboxId: null,
-        cleanupCompletedAt: null,
-        checkpointId: null,
-        invocationId: null,
-        createdAt: new Date(),
-      }));
-      for (const agent of agents)
-        agent.tokenHash = stringHash(agentToken(this.agentSecret, agent._id));
-      await this.agents.insertMany(agents, { session });
-      for (const [i, agent] of agents.entries()) {
-        const messageId = hash([runId, "initial", agent._id]);
-        const deliveryId = hash([messageId, agent._id]);
-        await this.messages.insertOne(
-          {
-            _id: messageId,
-            runId,
-            channelId,
-            senderId: "operator",
-            requestId: `initial_${agent._id}`,
-            fingerprint: hash(input.objective),
-            body: input.objective,
-            mentions: [agent._id],
-            recipients: [agent._id],
-            sequence: i + 1,
-            createdAt: new Date(),
-          },
-          { session },
-        );
-        await this.deliveries.insertOne(
-          {
-            _id: deliveryId,
-            runId,
-            recipientId: agent._id,
-            messageId,
-            channelId,
-            sequence: i + 1,
-            status: "pending",
-            createdAt: new Date(),
-          },
-          { session },
-        );
-        await this.outbox.insertOne(
-          {
-            _id: deliveryId,
-            runId,
-            recipientId: agent._id,
-            deliveryId,
-            kind: "mailbox_wakeup",
-            status: "pending",
-            attempts: 0,
-            createdAt: new Date(),
-          },
-          { session },
-        );
-      }
-      await this.channels.updateOne(
-        { _id: channelId },
-        { $set: { nextSequence: agents.length } },
-        { session },
+        orchestratorId,
+        "orchestrator",
+        "orchestrator",
+        ORCHESTRATOR_INSTRUCTIONS,
       );
-      return { run, agents: agents.map(({ tokenHash: _secret, ...agent }) => agent) as Agent[] };
+      await this.seedAgent(session, agent, "operator", input.objective);
+      await this.queueAction(session, runId, orchestratorId, "run_start", runId);
+      await this.event(session, { runId, agentId: "operator" }, "run.started", runId, {
+        objective: run.objective,
+        workerLimit: run.workerLimit,
+        orchestratorId,
+      });
+      return { run: await this.getRun(runId, session), agents: [this.publicAgent(agent)] };
     });
   }
+
+  async spawnAgent(actor: Actor, input: SpawnInput) {
+    return this.mutateInvocation(
+      actor.agentId,
+      actor.invocationId!,
+      actor.generation!,
+      async (agent, session) => {
+        const run = await this.assertActive(actor.runId, session);
+        if (agent.kind !== "orchestrator" || run.orchestratorId !== agent._id)
+          throw new HarnessError(403, "Only the run orchestrator can spawn workers");
+        const agentId = hash([run._id, "spawn", input.requestId]);
+        const fingerprint = hash(input);
+        const prior = await this.agents.findOne({ _id: agentId }, { session });
+        if (prior) {
+          if (prior.spawnRequestHash !== fingerprint)
+            fail("Spawn request ID reused with different input");
+          return this.publicAgent(prior);
+        }
+        const reserved = await this.runs.updateOne(
+          { _id: run._id, status: "active", workerCount: { $lt: run.workerLimit } },
+          { $inc: { workerCount: 1 } },
+          { session },
+        );
+        if (!reserved.matchedCount) fail("Worker limit reached (including pending workers)");
+        const worker = {
+          ...this.newAgent(run._id, agentId, "worker", input.role, input.instructions),
+          spawnRequestHash: fingerprint,
+        };
+        await this.seedAgent(
+          session,
+          worker,
+          agent._id,
+          `Begin the work assigned by agent ${agent._id}: ${input.instructions}\nUse get_run if you need the overall objective. Discover peers and coordinate through tasks and messages.`,
+        );
+        return this.publicAgent(worker);
+      },
+    );
+  }
+
+  async requestFinish(actor: Actor, input: FinishInput) {
+    return this.mutateInvocation(
+      actor.agentId,
+      actor.invocationId!,
+      actor.generation!,
+      async (agent, session) => {
+        const run = await this.getRun(actor.runId, session);
+        if (agent.kind !== "orchestrator" || run.orchestratorId !== agent._id)
+          throw new HarnessError(403, "Only the run orchestrator can finish the run");
+        if (run.completion) {
+          if (run.completion.fingerprint !== hash(input))
+            fail("Completion request conflicts with the accepted result");
+          return { status: "completing", finalCommit: run.completion.finalCommit };
+        }
+        await this.assertActive(run._id, session);
+        const tasks = await this.tasks.find({ runId: run._id }, { session }).limit(1001).toArray();
+        if (
+          tasks.length > 1000 ||
+          tasks.some(
+            (task) =>
+              task.status !== "done" ||
+              !task.result ||
+              (task.reviewerId &&
+                (!task.review ||
+                  task.reviewerId === task.ownerId ||
+                  task.review.commit !== task.result.commit)),
+          )
+        )
+          fail(
+            "All recorded tasks must be done; requested reviews must be resolved before completion",
+          );
+        if (input.finalCommit && !tasks.some((task) => task.result?.commit === input.finalCommit))
+          fail("Final commit must match a recorded task result");
+        const completion: NonNullable<Run["completion"]> = {
+          ...input,
+          fingerprint: hash(input),
+          invocationId: actor.invocationId!,
+          generation: actor.generation!,
+          deadline: new Date(Math.min(run.deadline.getTime(), Date.now() + 12 * 60 * 1000)),
+          status: "pending",
+        };
+        await this.runs.updateOne(
+          { _id: run._id, status: "active" },
+          { $set: { status: "completing", completion } },
+          { session },
+        );
+        await this.queueAction(
+          session,
+          run._id,
+          agent._id,
+          "run_completion",
+          `${run._id}:requested`,
+        );
+        await this.event(session, actor, "run.completion_requested", run._id, {
+          finalCommit: input.finalCommit,
+          outcome: input.outcome,
+          invocationId: actor.invocationId,
+        });
+        return { status: "completing", finalCommit: input.finalCommit };
+      },
+    );
+  }
+
+  async scheduleWakeup(
+    actor: Actor,
+    input: { requestId: string; delaySeconds: number; note: string },
+  ) {
+    return this.mutateInvocation(
+      actor.agentId,
+      actor.invocationId!,
+      actor.generation!,
+      async (_agent, session) => {
+        const run = await this.assertActive(actor.runId, session);
+        const timerId = hash([actor.agentId, input.requestId]);
+        const prior = await this.wakeups.findOne({ _id: timerId }, { session });
+        if (prior) {
+          if (prior.fingerprint !== hash(input))
+            fail("Wakeup request ID reused with different input");
+          return prior;
+        }
+        const wakeAt = new Date(Date.now() + input.delaySeconds * 1000);
+        if (wakeAt >= run.deadline) fail("Wakeup must be before the run deadline");
+        if (
+          (await this.wakeups.countDocuments(
+            { agentId: actor.agentId, status: "pending" },
+            { session },
+          )) >= 5
+        )
+          fail("At most five pending wakeups per agent");
+        const timer = {
+          _id: timerId,
+          runId: actor.runId,
+          agentId: actor.agentId,
+          fingerprint: hash(input),
+          note: input.note,
+          wakeAt,
+          status: "pending" as const,
+        };
+        await this.wakeups.insertOne(timer, { session });
+        await this.event(session, actor, "agent.wakeup_scheduled", timerId, {
+          wakeAt,
+          note: input.note,
+        });
+        return timer;
+      },
+    );
+  }
+
+  get wakeups() {
+    return this.db.collection<{
+      _id: string;
+      runId: string;
+      agentId: string;
+      fingerprint: string;
+      note: string;
+      wakeAt: Date;
+      status: "pending" | "fired" | "cancelled";
+    }>(`${this.collectionPrefix}wakeups`);
+  }
+
   async send(
     runId: string,
     senderId: string,
@@ -308,9 +591,10 @@ export class MongoStore extends CoordinationStore {
   ): Promise<Invocation | null> {
     return this.transaction(async (session) => {
       const agent = await this.getAgent(agentId, session);
-      const run = await this.assertActive(agent.runId, session);
+      const run = await this.getRun(agent.runId, session);
       const prior = await this.invocations.findOne({ _id: invocationId, agentId }, { session });
       if (prior) return prior;
+      if (run.status !== "active" || run.deadline <= new Date()) return null;
       if (agent.status === "needs_inspection" || agent.status === "stopped") return null;
       if (agent.invocationId)
         return this.invocations.findOne({ _id: agent.invocationId }, { session });
@@ -320,7 +604,40 @@ export class MongoStore extends CoordinationStore {
           { $set: { status: "needs_inspection" } },
           { session },
         );
+        await this.event(session, { agentId, runId: run._id }, "agent.budget_exhausted", agentId, {
+          status: "needs_inspection",
+          turns: agent.turns,
+        });
+        if (run.orchestratorId === agentId)
+          await this.queueAction(session, run._id, agentId, "run_completion", `budget_${agentId}`);
+        else if (run.orchestratorId)
+          await this.enqueueMessage(
+            session,
+            run._id,
+            "harness",
+            run.orchestratorId,
+            `Agent ${agentId} exhausted its invocation budget and needs inspection.`,
+            `budget_${agentId}`,
+          );
         return null;
+      }
+      for (const timer of await this.wakeups
+        .find({ agentId, status: "pending", wakeAt: { $lte: new Date() } }, { session })
+        .toArray()) {
+        await this.enqueueMessage(
+          session,
+          agent.runId,
+          "harness",
+          agentId,
+          `[Scheduled wakeup] ${timer.note}`,
+          `timer_${timer._id}`,
+        );
+        await this.wakeups.updateOne(
+          { _id: timer._id, status: "pending" },
+          { $set: { status: "fired" } },
+          { session },
+        );
+        await this.event(session, { agentId, runId: agent.runId }, "agent.timer_fired", timer._id);
       }
       const deliveries = await this.deliveries
         .find({ recipientId: agentId, status: "pending" }, { session })
@@ -482,6 +799,30 @@ export class MongoStore extends CoordinationStore {
         },
         session,
       );
+      const run = await this.getRun(agent.runId, session);
+      if (run.status === "completing" && run.completion?.invocationId === result.invocationId) {
+        await this.runs.updateOne(
+          { _id: run._id },
+          {
+            $set: {
+              "completion.status": result.outcome === "completed" ? "checkpointed" : "failed",
+              ...(result.outcome === "completed"
+                ? {}
+                : {
+                    "completion.error": result.error ?? "Final orchestrator turn did not complete",
+                  }),
+            },
+          },
+          { session },
+        );
+        await this.queueAction(
+          session,
+          run._id,
+          agentId,
+          "run_completion",
+          `${run._id}:checkpoint`,
+        );
+      }
     });
   }
 
@@ -523,6 +864,26 @@ export class MongoStore extends CoordinationStore {
         },
         session,
       );
+      const run = await this.getRun(agent.runId, session);
+      if (current && ["active", "completing"].includes(run.status) && run.orchestratorId) {
+        if (agentId === run.orchestratorId)
+          await this.queueAction(
+            session,
+            run._id,
+            agentId,
+            "run_completion",
+            `failed_${invocationId ?? agent.generation}`,
+          );
+        else if (run.status === "active")
+          await this.enqueueMessage(
+            session,
+            run._id,
+            "harness",
+            run.orchestratorId,
+            `Agent ${agentId} needs inspection: ${error.slice(0, 4000)}`,
+            `failed_${agentId}_${invocationId ?? agent.generation}`,
+          );
+      }
     });
   }
 
@@ -553,7 +914,8 @@ export class MongoStore extends CoordinationStore {
     await this.transaction(async (session) => {
       const agent = await this.getAgent(agentId, session);
       const run = await this.getRun(agent.runId, session);
-      if (run.status === "active") fail("Cannot confirm cleanup of an active run");
+      if (run.status === "active" || run.status === "completing")
+        fail("Cannot confirm cleanup of an active run");
       if (
         await this.invocations.findOne(
           { agentId, "provisioningAttempts.0": { $exists: true } },
@@ -561,21 +923,45 @@ export class MongoStore extends CoordinationStore {
         )
       )
         fail("Sandbox provisioning is still in flight; cleanup unconfirmed");
-      await this.agents.updateOne(
+      const cleaned = await this.agents.updateOne(
         { _id: agentId, cleanupCompletedAt: null },
         { $set: { status: "stopped", sandboxId: null, cleanupCompletedAt: new Date() } },
         { session },
       );
+      if (cleaned.modifiedCount) {
+        // All cleanup transactions write the run's event counter before counting.
+        // This prevents snapshot write skew: concurrent agents otherwise each see
+        // a peer still pending and leave a fully cleaned run stuck at stopping.
+        await this.event(
+          session,
+          { runId: run._id, agentId: "harness" },
+          "agent.cleanup_confirmed",
+          agentId,
+        );
+      }
       const remaining = await this.agents.countDocuments(
         { runId: agent.runId, cleanupCompletedAt: null },
         { session },
       );
-      if (!remaining)
-        await this.runs.updateOne(
+      if (!remaining) {
+        const finalized = await this.runs.updateOne(
           { _id: agent.runId, status: "stopping" },
-          { $set: { status: "stopped" } },
+          { $set: { status: run.finalStatus ?? "stopped", endedAt: new Date() } },
           { session },
         );
+        if (finalized.modifiedCount)
+          await this.event(
+            session,
+            { runId: run._id, agentId: "harness" },
+            "run.finished",
+            run._id,
+            {
+              status: run.finalStatus ?? "stopped",
+              finalCommit: run.completion?.finalCommit,
+              outcome: run.completion?.outcome,
+            },
+          );
+      }
     });
   }
 
@@ -590,14 +976,49 @@ export class MongoStore extends CoordinationStore {
       fail("Agent already has a different sandbox binding");
   }
 
-  async stopRun(runId: string): Promise<void> {
+  async stopRun(
+    runId: string,
+    finalStatus: "stopped" | "completed" | "failed" = "stopped",
+    failure?: string,
+  ): Promise<void> {
     await this.transaction(async (session) => {
       const run = await this.getRun(runId, session);
-      if (run.status === "stopped") return;
-      await this.runs.updateOne({ _id: runId }, { $set: { status: "stopping" } }, { session });
+      if (!["active", "completing"].includes(run.status)) return;
+      if (finalStatus === "completed" && run.completion?.status !== "checkpointed")
+        fail("Completion requires the final orchestrator checkpoint");
+      await this.runs.updateOne(
+        { _id: runId },
+        {
+          $set: {
+            status: "stopping",
+            finalStatus,
+            ...(failure ? { failure } : {}),
+            ...(run.completion && finalStatus !== "completed"
+              ? {
+                  "completion.status": "failed",
+                  "completion.error": failure ?? "Operator stopped the run before completion",
+                }
+              : {}),
+          },
+        },
+        { session },
+      );
+      await this.wakeups.updateMany(
+        { runId, status: "pending" },
+        { $set: { status: "cancelled" } },
+        { session },
+      );
+      await this.event(session, { runId, agentId: "harness" }, "run.stopping", runId, {
+        finalStatus,
+        failure,
+      });
       const agents = await this.agents.find({ runId }, { session }).toArray();
       if (!agents.length)
-        await this.runs.updateOne({ _id: runId }, { $set: { status: "stopped" } }, { session });
+        await this.runs.updateOne(
+          { _id: runId },
+          { $set: { status: finalStatus, endedAt: new Date() } },
+          { session },
+        );
       for (const agent of agents) {
         if (agent.status === "stopped") continue;
         await this.agents.updateOne(

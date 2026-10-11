@@ -1,171 +1,220 @@
 # atoi
 
-**Your persistent AI team in the cloud.**
+**Persistent agent teams in the cloud.**
 
-atoi is building a personal team of agents that stays available as your work
-develops. Each agent has its own cloud workspace and session context. Members
-share tasks, conversations and evidence, and can consult the same peers again
-when a new question builds on earlier work. Completing a task leaves its agent
-available for the next conversation.
+atoi brings a team of agents into one shared conversation. Each agent has its own
+Modal sandbox, files, tools and native Pi session. Agents can divide up work,
+consult peers directly and return to earlier investigations when a new question
+comes up. Shared tasks, messages and versioned evidence keep the team coordinated.
 
-The technical idea is to organize inference compute across several retained,
-focused contexts. Agents investigate different parts of a problem, do real work
-in their own sandboxes, and exchange the information they need through direct
-messages. Persistence lets those conversations continue after the first answer.
-See the [product story and inference-scaling thesis](docs/product-story.md).
+The project is an experimental prototype. Agents stay available across turns and
+tasks within a run; completing the run stops compute. Reusing a team across
+completed runs is planned.
 
-Code is the first proving ground for this broader product vision. Pi runs the
-model/tool loop; Modal provides one sandbox per agent; Temporal schedules work;
-Atlas holds durable coordination state and checkpoints; Git holds project files
-and artifacts. The first full milestone targets an orchestrator plus two workers
-and a smoke check adding a third worker. Team continuity is scoped to a run;
-reusing the same team across completed runs remains future work.
+[Quick start](#quick-start) · [Architecture](#architecture) ·
+[Documentation](#documentation) · [Contributing](#contributing)
 
-## Implemented
+![Start a conversation with your agent team](docs/screenshots/new-conversation.jpg)
 
-The unified TypeScript harness provides:
+## What you can do
 
-- Scoped bearer authentication and operator bootstrap APIs.
-- Agent registration with atomic worker-capacity limits.
-- Task creation, atomic claims, dependencies and versioned review transitions.
-- Team channels and private DMs with ordered, paginated history.
-- Atomic message, delivery and outbox writes with request deduplication.
-- A read-only pending inbox and structured audit records.
+- Start a conversation in the web app or CLI. An orchestrator chooses worker roles
+  and requests peers within your configured limit.
+- Give each agent a private cloud workspace for code, notes, dependencies and
+  experiments. Research and planning runs do not require a Git repository.
+- Collaborate through a team channel and direct messages. Addressed messages and
+  durable timers wake agents for another turn.
+- Track tasks with atomic ownership, acceptance criteria and optional peer review.
+  Requested code reviews check the exact submitted commit.
+- Continue from native Pi session checkpoints stored in Atlas. Task completion
+  leaves an agent available for follow-up while its run remains active.
+- Inspect recorded activity, tool results, working notes and model usage. Refreshing
+  or closing the browser does not cancel work; Stop and run deadlines drive cleanup.
 
-- Pi coding tools in private Modal workspaces, with bounded model/tool turns.
-- Temporal scheduling, durable outbox reconciliation, per-agent serialization and cleanup.
-- Native Pi session checkpoints published atomically with inbox acknowledgement.
-- Invocation fencing, confirmed-result reuse and explicit inspection of ambiguous failures.
-- Authenticated activity history and SSE APIs, with CLI replay and observation.
+The design keeps useful context in agent sessions, files and published artifacts.
+Its potential benefits for inference scaling, repeated work and handoff quality
+are described in the [product story](docs/product-story.md) and
+[context-scaling notes](docs/context-scaling.md). Cost and quality improvements
+require comparison against a baseline.
 
-The runtime retains each sandbox between turns; idle guests remain alive and billed.
-VM pause/resume and automated sandbox replacement are not implemented. The API's
-bootstrap registration still creates logical agents only; `/operator/runs` starts
-runtime-enabled agents. Task approval requires an independent reviewer of the exact
-commit, but evidence remains agent-reported rather than trusted evaluator output.
+## Quick start
 
-Local tests cover the integrated harness with scripted inference and sandbox fixtures.
-Real Atlas + Modal + Pi + live-model E2E passed, including independent review,
-peer wakeup, native checkpoint history, private file reuse and confirmed cleanup.
-The check uses a read-only public Git commit; private Git push remains unverified. See [runtime setup and
-limits](docs/runtime.md).
+### Preview the interface
 
-## Run locally
-
-Requires Node.js 24+ and pnpm 11.19.0. Use MongoDB Atlas or a replica set; a
-standalone MongoDB server cannot execute the required transactions.
+Requires **Node.js 24+** and **pnpm 11.19.0**.
 
 ```sh
+git clone https://github.com/WingchunSiu/atoi.git
+cd atoi
 pnpm install --frozen-lockfile
-cp .env.example .env
-```
-
-Set `MONGODB_URI`, `MONGODB_DATABASE`, `ADMIN_TOKEN`, `AGENT_TOKEN_SECRET`,
-`BACKEND_PUBLIC_URL`, `PI_PROVIDER` and `PI_MODEL` in `.env`. Generate separate
-operator and agent secrets with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
-Never commit `.env` or share the operator token with agents. For Atlas, configure
-network access and a database user permitted to read/write the chosen database
-and create its indexes.
-
-For a disposable local database instead of Atlas, start this in a separate terminal:
-
-```sh
-pnpm db:local
-```
-
-It downloads MongoDB 8.2.3 on first use and caches the binary under `.cache/mongodb`.
-It binds only to localhost on port 27017 and discards its data when stopped. The
-local connection URI is `mongodb://127.0.0.1:27017/?replicaSet=testset`. Use Atlas for data that must outlive this
-local database process.
-
-Start a durable local Temporal service, then the API and worker in separate terminals:
-
-```sh
-mkdir -p .atoi
-temporal server start-dev --db-filename .atoi/temporal.db
-pnpm dev:api
-pnpm dev:worker
-```
-
-The default address is `http://127.0.0.1:3000`. Change `API_HOST` and `API_PORT` as
-needed. Modal workers require an HTTPS `BACKEND_PUBLIC_URL` reaching this API;
-configure Modal authentication and a model secret before launching real agents.
-The liveness endpoint is `/health`. See [runtime setup](docs/runtime.md) for the
-complete setup, CLI run/message/stop sequence and real E2E command.
-
-## Coordination demo
-
-With the API running:
-
-```sh
-pnpm demo
-```
-
-The script creates a uniquely named run and two logical agents, claims a task,
-sends a DM, reads the recipient inbox, and submits/approves a synthetic result.
-It prints record IDs, never credentials. This is an API demo with fixture evidence;
-no model, Git command or sandbox runs. Its logical agents are not runtime-enabled,
-so their inbox remains pending. Each invocation creates a fresh run and leaves its
-records for inspection. Use a dedicated demo database; there is no shared-data
-reset command.
-
-## Agent activity APIs and CLI
-
-Pi session messages, visible text, tool output and agent working logs are recorded
-as ordered Atlas events. The CLI can inspect an agent, replay history and watch
-live activity. Working notes are agent reports and do not approve tasks.
-
-```sh
-pnpm cli agent <runId> <agentId>
-pnpm cli history <runId> [agentId] [afterCursor]
-pnpm cli watch <runId> [agentId] [afterCursor]
-```
-
-The browser UI is developed separately against the authenticated backend APIs.
-This runtime includes the activity contract and CLI, with paginated replay and
-reconnecting observation. See [activity APIs and limits](docs/activity.md) and
-[runtime setup](docs/runtime.md).
-
-## Checks
-
-```sh
-pnpm check
-pnpm test:unit
-pnpm test:integration
-pnpm test:runtime
-pnpm build
-```
-
-`pnpm test` runs the coordination and runtime/activity suites. Unit checks need no
-database or network. Coordination integration
-tests start a real temporary MongoDB replica set, requiring a binary download on
-first use and local process/socket access. Subsequent runs can reuse the cached
-binary offline. Tests create and remove only their randomly named `atoi_test_*`
-database, then stop their temporary server.
-
-To test against an existing replica set or Atlas, set `TEST_MONGODB_URI` in the
-shell; the test command does not load `.env`. It still creates and deletes only a
-unique test database and never uses `MONGODB_DATABASE`. The test identity needs
-index-creation, transaction, `collMod` and database-drop permissions in that test
-database. The rollback test uses a temporary collection validator to force a real
-transaction failure. Local replica-set tests do not establish Atlas cloud access. Runtime tests also
-start real local Temporal services and use scripted inference/sandbox fixtures;
-first use may download the Temporal executable.
-
-Build output goes to `dist/`. Run the compiled service with `pnpm start`.
-
-## Dashboard
-
-A browser dashboard for watching a run and messaging the orchestrator lives in
-[`dashboard/`](dashboard/README.md). It runs on scripted mock data and a local fake event
-stream; it is not connected to the coordination service yet.
-
-```sh
 pnpm --filter atoi-dashboard dev
 ```
 
-## Design and contributing
+Open [the scripted demo](http://127.0.0.1:5173/?source=mock). These fixtures show
+team chat, task handoffs and recovery events without credentials, a database,
+model calls or cloud sandboxes. They are explicitly labeled mock data.
 
-- [Shared state and messaging contract](docs/state-and-messaging.md)
-- [Milestone and acceptance checks](docs/milestone-1.md)
-- [Agent engineering and PR rules](AGENTS.md)
+### Run a real team
+
+You need MongoDB Atlas or a MongoDB replica set, a Modal account, a model API key
+and `cloudflared` on your PATH. A standalone MongoDB server does not support the
+transactions used by the harness. The demo runner starts its own persistent local
+Temporal service and worker.
+
+```sh
+cp .env.example .env
+```
+
+Fill in the placeholders using the following configuration:
+
+| Setting | Purpose |
+| --- | --- |
+| `MONGODB_URI`, `MONGODB_DATABASE` | Coordination records and session checkpoints. Allow the backend host to connect and create indexes. |
+| `ADMIN_TOKEN`, `AGENT_TOKEN_SECRET` | Separate operator and agent secrets, each at least 32 URL-safe characters. |
+| `BACKEND_PUBLIC_URL` | Set to `http://127.0.0.1:3000` for the demo runner, which supplies its tunnel URL to guests. Separate services need a reachable HTTPS URL. |
+| Modal profile or `MODAL_TOKEN_ID`, `MODAL_TOKEN_SECRET` | Sandbox lifecycle access held by the trusted backend. |
+| `ATOI_MODEL_API_KEY` or `MODAL_MODEL_SECRET` | Model access for Pi. A named Modal Secret must contain `ATOI_MODEL_API_KEY`. |
+| `PI_PROVIDER`, `PI_MODEL` | A provider/model pair supported by the pinned Pi SDK. The example uses `openai` and `gpt-4.1`. |
+| `MODAL_GIT_SECRET` | Optional named Secret containing a repository-scoped `GITHUB_TOKEN` for GitHub HTTPS clones and pushes. |
+
+Generate each operator/agent secret separately:
+
+```sh
+node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"
+```
+
+Stop the preview server, then build and launch the local live demo. The runner
+uses ports 3000 and 5173.
+
+```sh
+pnpm build
+pnpm demo:web
+```
+
+Set `CLOUDFLARED_PATH=/path/to/cloudflared` if the executable is not on your PATH.
+Open [the dashboard](http://127.0.0.1:5173/) and send a bounded objective. For a
+follow-up demo, explicitly ask the team to wait before finishing the run:
+
+> Compare two approaches to parsing quoted CSV fields. Ask a peer to review the
+> reasoning, record the evidence, and wait for my follow-up before finishing the run.
+
+Inspect the conversation and activity, then ask a related question. Use **Stop**
+when finished. Optional conversation settings control the repository, worker cap
+and time limit. The worker limit excludes the orchestrator and can be zero.
+
+The runner starts the API, HTTPS tunnel, Temporal service, worker and dashboard.
+It stores demo records in isolated `browser_*` collections in the configured
+MongoDB database and preserves local Temporal history in `.atoi/browser-temporal.db`.
+No seed step or automatic database reset is needed. Records remain after compute
+stops. Ctrl-C stops this demo's active runs; idle sandboxes remain alive and billed.
+
+For separate API/worker processes, a disposable local replica set or hosted
+services, follow [runtime setup](docs/runtime.md) and
+[deployment boundaries](docs/deployment.md). Keep credentials out of source control.
+The included browser gateway is for local development; hosted operator
+authentication remains to be implemented.
+
+## CLI
+
+With the API and Temporal worker running, the CLI uses the same backend:
+
+```sh
+pnpm cli start - "Research this question and return a sourced comparison" 2
+pnpm cli start https://github.com/<team>/<repo>.git "Implement and independently review a bounded fix" 2
+pnpm cli status <runId>
+pnpm cli message <runId> <agentId> "Check your earlier finding under this new condition."
+pnpm cli history <runId> [agentId] [afterCursor]
+pnpm cli watch <runId> [agentId] [afterCursor]
+pnpm cli stop <runId>
+```
+
+Use `-` for work without a repository. The final `start` argument is the worker
+limit: default 2, range 0–8, excluding the orchestrator. The CLI reads
+`BACKEND_PUBLIC_URL` and `ADMIN_TOKEN` from `.env`.
+
+`pnpm demo` exercises task claims, messages and synthetic review evidence through
+the API using logical agents. It creates a fresh run without model calls or
+sandboxes and leaves its records for inspection. Use a dedicated demo database;
+there is no shared-data reset command.
+
+## Architecture
+
+```mermaid
+flowchart LR
+    UI["Web app / CLI"] --> API["Fastify API"]
+    API <--> Atlas["MongoDB Atlas"]
+    API --> Temporal["Temporal service"]
+    Worker["Temporal worker"] <--> Temporal
+    Worker <--> Atlas
+    Worker -->|"lifecycle and turns"| Agents["Modal sandboxes · Pi agents"]
+    Agents -->|"scoped tools"| API
+    Agents <--> Git["Git repositories"]
+```
+
+Fastify, the Temporal worker and the outbox/reconciler form the trusted control
+plane. They enforce authorization, task ownership, worker capacity, retries,
+deadlines and cleanup independently of the planning agent. Agents and browsers
+receive no Atlas or Modal provider credentials.
+
+Atlas holds runs, agents, tasks, conversations, deliveries, events and native Pi
+checkpoints. Temporal owns scheduling and workflow history in its own service.
+Each sandbox owns a private filesystem; Git holds shared project files and
+artifacts at immutable commits. Agents exchange references and fetch work into
+their own clones rather than editing one shared filesystem.
+
+## Current limits
+
+- Persistence is scoped to a run. Cross-run teams, semantic memory retrieval and
+  automatic sandbox replacement are deferred.
+- Recovery covers confirmed Pi checkpoints and pushed Git revisions. Uncommitted
+  files, running processes and RAM have no replacement guarantee.
+- Idle sandboxes are retained and billed. VM suspension and zero-cost waiting are
+  not implemented.
+- Task evidence and working notes are agent reports. Requested peer review is
+  supported; a trusted evaluator is not implemented.
+- A documented live E2E exercised Atlas, Modal, Pi, peer review, checkpoint history,
+  private file reuse and cleanup against a read-only public Git commit. Private Git
+  push remains unverified. See [verification details](docs/runtime.md).
+
+## Development
+
+```sh
+pnpm check                            # TypeScript and Biome
+pnpm test                             # Coordination and runtime suites
+pnpm build                            # Backend and guest bundle
+pnpm --filter atoi-dashboard test
+pnpm --filter atoi-dashboard build
+```
+
+Integration tests start temporary MongoDB replica sets and local Temporal services.
+The first run may download their executables. Model inference and sandbox operations
+are scripted fixtures in local runtime tests. Use `pnpm test:unit` for checks that
+need no database or network; `pnpm e2e` uses real cloud services and inference.
+
+Coordination tests can use `TEST_MONGODB_URI` from the shell for an existing replica
+set or Atlas. They create and remove a unique test database, never the configured
+`MONGODB_DATABASE`; this command does not load `.env`. A disposable development
+replica set is also available through `pnpm db:local`; its data is discarded when
+stopped. Its URI is `mongodb://127.0.0.1:27017/?replicaSet=testset`.
+See [test setup and permissions](docs/state-and-messaging.md).
+
+## Documentation
+
+| Guide | Contents |
+| --- | --- |
+| [Runtime](docs/runtime.md) | Credentials, separate services, CLI demos, integration evidence and recovery limits |
+| [Dashboard](dashboard/README.md) | Live adapter, local gateway, offline fixtures and UI controls |
+| [Orchestration](docs/orchestration.md) | Run admission, dynamic workers, timers, completion and API migration |
+| [State and messaging](docs/state-and-messaging.md) | Task transitions, channel permissions, transactions and delivery |
+| [Activity](docs/activity.md) | Recorded tool activity, working notes, replay and SSE |
+| [Deployment](docs/deployment.md) | Local and hosted control-plane boundaries |
+| [Product story](docs/product-story.md) | Persistent teams and the inference-scaling thesis |
+| [Context scaling](docs/context-scaling.md) | Filesystem context, evidence, evaluation and deferred sharing |
+| [Milestone 1](docs/milestone-1.md) | Scope and acceptance criteria |
+
+## Contributing
+
+Issues and focused pull requests are welcome. Include a reproducible problem,
+relevant checks and any setup or migration changes. For UI work, include screenshots
+or a short recording. Follow the [engineering and PR guidelines](AGENTS.md),
+including preserving unrelated work and using squash merges.

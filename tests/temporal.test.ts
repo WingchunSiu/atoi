@@ -32,6 +32,7 @@ describe("real Temporal service with fixture Activities", () => {
         workflowsPath,
         stickyQueueScheduleToStartTimeout: "1 second",
         activities: {
+          nextWakeup: async () => 60000,
           turn: async () => {
             turns++;
             return { work: false };
@@ -74,6 +75,7 @@ describe("real Temporal service with fixture Activities", () => {
       workflowsPath,
       stickyQueueScheduleToStartTimeout: "1 second",
       activities: {
+        superviseRun: async () => ({ finished: false, nextCheckMs: 60000 }),
         expireRun: async (runId: string) => {
           expired.push(runId);
         },
@@ -89,3 +91,87 @@ describe("real Temporal service with fixture Activities", () => {
     expect(expired).toEqual(["deadline-fixture"]);
   }, 30000);
 });
+
+it("resumes run completion after worker restart and a queued checkpoint notification", async () => {
+  const taskQueue = "completion-restart-fixture";
+  let checks = 0;
+  let checkpointReady = false;
+  let expiration = 0;
+  const createWorker = () =>
+    Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue,
+      workflowsPath,
+      stickyQueueScheduleToStartTimeout: "1 second",
+      activities: {
+        superviseRun: async () => {
+          checks++;
+          return { finished: checkpointReady, nextCheckMs: 60000 };
+        },
+        expireRun: async () => {
+          expiration++;
+        },
+      },
+    });
+  const first = await createWorker();
+  const firstRun = first.run();
+  const handle = await environment.client.workflow.start("runSupervisor", {
+    workflowId: "run/completion-restart-fixture",
+    taskQueue,
+    args: ["completion-restart-fixture", Date.now() + 30000],
+  });
+  await until(() => checks === 1);
+  first.shutdown();
+  await firstRun;
+  checkpointReady = true;
+  await handle.signal("finish");
+  const second = await createWorker();
+  await second.runUntil(() => handle.result());
+  expect(checks).toBeGreaterThanOrEqual(2);
+  expect(expiration).toBe(0);
+}, 60000);
+
+it("preserves an idle workflow timer across a Temporal worker restart", async () => {
+  const taskQueue = "timer-restart-fixture";
+  let turns = 0;
+  let timerReads = 0;
+  const createWorker = () =>
+    Worker.create({
+      connection: environment.nativeConnection,
+      taskQueue,
+      workflowsPath,
+      stickyQueueScheduleToStartTimeout: "1 second",
+      activities: {
+        turn: async () => {
+          turns++;
+          return { work: false };
+        },
+        nextWakeup: async () => {
+          timerReads++;
+          return 1500;
+        },
+        stopAgent: async () => {},
+      },
+    });
+  const first = await createWorker();
+  const firstRun = first.run();
+  const handle = await environment.client.workflow.start("agentWorkflow", {
+    workflowId: "agent/timer-restart-fixture",
+    taskQueue,
+    args: ["timer-restart-fixture"],
+  });
+  await until(() => timerReads === 1);
+  first.shutdown();
+  await firstRun;
+  const second = await createWorker();
+  const secondRun = second.run();
+  try {
+    await until(() => turns >= 2);
+    await handle.signal("stop");
+    await handle.result();
+    expect(turns).toBeGreaterThanOrEqual(2);
+  } finally {
+    second.shutdown();
+    await secondRun;
+  }
+}, 60000);

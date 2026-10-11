@@ -6,7 +6,6 @@ import {
   dmItems,
   dmLabel,
   nameOf,
-  orchestratorId,
   type Tone,
   teamItems,
   userDmKey,
@@ -31,6 +30,7 @@ const TONE: Record<Tone, string> = {
 const GROUP_MS = 3 * 60_000;
 
 function Avatar({ id }: { id: AgentId }) {
+  if (id === "harness") return <span className="text-chip text-muted">system</span>;
   if (id !== USER_ID) return <AgentAvatar id={id} size={36} />;
   return (
     <span
@@ -43,6 +43,7 @@ function Avatar({ id }: { id: AgentId }) {
 }
 
 function SenderName({ id, state }: { id: AgentId; state: RunState }) {
+  if (id === "harness") return <span className="text-chip text-muted">system</span>;
   if (id === USER_ID) return <span className="text-body font-semibold">you</span>;
   return (
     <button
@@ -198,9 +199,24 @@ function Header({
             className="truncate text-chip text-muted"
             title="Select an edge on the canvas to open that DM"
           >
-            {agents} agent{agents === 1 ? "" : "s"} · select an edge for DMs
+            {agents} agent{agents === 1 ? "" : "s"} · team channel
           </p>
         </div>
+        <select
+          aria-label="Message recipient"
+          value=""
+          onChange={(e) => {
+            if (e.target.value) actions.openChat([USER_ID, e.target.value].sort().join("|"));
+          }}
+          className="max-w-[140px] rounded-box border border-line bg-card p-1 text-chip"
+        >
+          <option value="">Message a peer</option>
+          {state.agentOrder.map((id) => (
+            <option key={id} value={id}>
+              {state.agents[id]?.role}
+            </option>
+          ))}
+        </select>
         {userKey && (
           <button
             type="button"
@@ -230,7 +246,7 @@ function Header({
           {dmLabel(state, chat)}
         </h2>
         <p className="text-chip text-muted">
-          {isUser ? "Your direct line to the orchestrator" : "Direct messages"}
+          {isUser ? "Your direct conversation with this agent" : "Direct messages"}
         </p>
       </div>
       <label className="flex shrink-0 cursor-pointer items-center gap-1.5 text-chip">
@@ -262,9 +278,12 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
   }, [focusTick]);
 
   const orch = state.agents[orchestrator];
-  const runOver = state.run && TERMINAL_RUN_STATUSES.has(state.run.status);
+  const runOver =
+    state.run &&
+    (TERMINAL_RUN_STATUSES.has(state.run.status) ||
+      ["completing", "stopping"].includes(state.run.status));
   const blocked = runOver
-    ? `The run is ${state.run!.status}. Start a new run from the CLI to give more instructions.`
+    ? `The run is ${state.run!.status}. Start a new run to give more instructions.`
     : orch && (orch.state === "stopped" || orch.state === "failed")
       ? `The orchestrator has ${orch.state === "stopped" ? "stopped" : "failed"}.`
       : undefined;
@@ -320,8 +339,12 @@ function Composer({ state, orchestrator }: { state: RunState; orchestrator: Agen
               }
             }}
             rows={Math.min(6, Math.max(2, text.split("\n").length))}
-            placeholder="Message orchestrator"
-            aria-label="Message orchestrator"
+            placeholder={
+              orchestrator
+                ? `Message ${orch?.role ?? "agent"}`
+                : "Message the team · orchestrator will respond"
+            }
+            aria-label={orchestrator ? "Message agent" : "Team message"}
             className="min-w-0 flex-1 resize-none rounded-box border-2 border-ink bg-paper px-2.5 py-1.5 font-sans text-[15px] leading-[22px] text-ink placeholder:text-muted"
           />
           <button
@@ -351,8 +374,8 @@ export function ChatPanel() {
   const events = useRunSnapshot(selectEvents);
   const state = useRunState();
   const userKey = userDmKey(state);
-  const orchestrator = orchestratorId(state);
-  const isUserDm = !!chat && chat === userKey;
+  const isUserDm = !!chat && chat.split("|").includes(USER_ID);
+  const recipient = isUserDm ? chat!.split("|").find((id) => id !== USER_ID) : undefined;
   const pending = useStore(outbox, (o) => o.items);
 
   const items = useMemo(
@@ -370,7 +393,9 @@ export function ChatPanel() {
       outbox.set((o) => ({ items: o.items.filter((p) => !echoed.has(p.clientRequestId)) }));
     }
   }, [echoed, pending, outbox]);
-  const visiblePending = isUserDm ? pending.filter((p) => !echoed.has(p.clientRequestId)) : [];
+  const visiblePending = pending.filter(
+    (p) => !echoed.has(p.clientRequestId) && p.to === (recipient ?? ""),
+  );
 
   const retry = useCallback(
     async (item: Outgoing) => {
@@ -461,6 +486,23 @@ export function ChatPanel() {
                   />
                 );
               }
+              if (item.kind === "response")
+                return (
+                  <li key={item.key} className="flex gap-3 px-4 pt-3">
+                    <Avatar id={item.agentId} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-baseline gap-2">
+                        <SenderName id={item.agentId} state={state} />
+                        <span className="text-chip text-muted">
+                          {shortClock(item.ts)} · agent output
+                        </span>
+                      </div>
+                      <p className="whitespace-pre-wrap break-words font-sans text-[15px] leading-[22px]">
+                        <RichText text={item.text} />
+                      </p>
+                    </div>
+                  </li>
+                );
               if (item.kind === "milestone") return <MilestoneRow key={item.key} item={item} />;
               const showName = !(prev?.kind === "activity" && prev.agentId === item.agentId);
               return <ActivityRow key={item.key} item={item} state={state} showName={showName} />;
@@ -488,7 +530,17 @@ export function ChatPanel() {
           </button>
         )}
       </div>
-      {isUserDm && orchestrator && <Composer state={state} orchestrator={orchestrator} />}
+      {(isUserDm || !chat) &&
+        state.agentOrder.some(
+          (id) =>
+            (!recipient || id === recipient) &&
+            ["running", "provisioning", "checkpointing"].includes(state.agents[id]?.state ?? ""),
+        ) && (
+          <p role="status" className="px-4 py-2 text-chip text-muted">
+            {recipient ? nameOf(state, recipient) : "Team"} is working…
+          </p>
+        )}
+      {(isUserDm || !chat) && <Composer state={state} orchestrator={recipient ?? ""} />}
     </section>
   );
 }

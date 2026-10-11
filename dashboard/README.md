@@ -5,9 +5,12 @@ that is the main way to read what the team is doing, and a direct line from you 
 orchestrator. It started from [`atoi-dashboard-plan.md`](../atoi-dashboard-plan.md); the
 product changes since then are listed below.
 
-**Status: mock data only.** Nothing here talks to the real backend yet. The UI runs on
-scripted fixtures in the browser and on a local fake backend (`fake-sse`). A run working
-here does not show that the backend, Atlas, Modal or Temporal integration works.
+**Status: connected to the real backend.** Start a conversation by sending its first
+message. The backend stores the run in Atlas; Temporal drives real Pi/Modal work.
+The live adapter projects persisted activity into the mesh and chat, and refreshes
+current task/agent state from authoritative snapshots. Pi text is visible even with
+tool activity hidden. A human team post mentions the orchestrator so it wakes.
+Offline fixtures are explicitly available at `?source=mock`.
 
 ## Setup
 
@@ -26,8 +29,8 @@ Copy `.env.example` to `.env` to change defaults:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `VITE_API_TARGET` | `http://localhost:8787` | Where the dev server proxies `/api` |
-| `VITE_DEFAULT_SOURCE` | `mock` | Source used when the URL has no `?source=` |
+| `VITE_API_TARGET` | `http://127.0.0.1:3000` | Where the dev server proxies `/api` |
+| `VITE_DEFAULT_SOURCE` | `live` | Source used when the URL has no `?source=` |
 
 ## Using it
 
@@ -107,46 +110,45 @@ with [DiceBear](https://www.dicebear.com/) (MIT). DiceBear is a dev dependency o
 | URL | What it shows |
 | --- | --- |
 | `?source=mock&fixture=happy-path` | A scripted fixture streamed like a live run (also `recovery`, `third-worker`, `edge-states`). `&speed=2` plays it faster. A picker in the top bar switches fixtures; reload to restart. |
-| `?source=live` | The newest run from `GET /api/runs`, streamed over SSE |
+| `/` or `?source=live` | New conversation with optional settings and recent conversations |
 | `?source=live&run=r_8f2` | A specific run |
 
 In mock mode, messages you send get a scripted reply that says it's scripted.
 
-### Fake backend
+## Backend adapter
 
-`fake-sse` serves a fixture through the same endpoints the real backend will implement, so
-the live path (EventSource, reconnects, `Last-Event-ID`, sending messages) can be tested:
+`src/sources/backend.ts` validates native run snapshots and maps persisted activity
+into the display contract in `src/contract/events.ts`. The raw SSE cursor stays
+separate from the render sequence. Internal harness messages are labeled system,
+not attributed to you or counted as agents.
 
-```bash
-pnpm fake-sse --fixture happy-path --speed 4 --drop-after 30
-```
-
-Then open `http://localhost:5173/?source=live`. `--drop-after N` closes each connection
-after N events to test reconnects. The server marks its run `mock: true`, so the dashboard
-shows the mock strip.
-
-## Backend contract
-
-[`src/contract/events.ts`](src/contract/events.ts) holds the event types and zod schemas,
-with no React or app imports so the backend can copy it. Endpoints:
+The loopback Vite gateway proxies `/api` to authenticated `/operator` endpoints and
+injects `ADMIN_TOKEN` server-side. It checks request origin and a browser header;
+it is for local development, not a hosted authentication layer.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `GET /api/runs` | `{ runs: { id, objective, status, startedAt, mock? }[] }`, newest first |
-| `GET /api/runs/:runId/events` | SSE: every event after `Last-Event-ID` / `?after=`, then new ones |
-| `POST /api/runs/:runId/messages` | **New.** Body `{ to, body, clientRequestId }`, returns `202 { messageId }` |
+| `GET /api/runs` | Native run records, newest first |
+| `POST /api/runs` | Durably create a run from the first chat message |
+| `GET /api/runs/:runId` | Authoritative agents, tasks, messages, channels and invocation state |
+| `GET /api/runs/:runId/events/stream?after=N` | Named `activity` SSE events after the native sequence |
+| `POST /api/runs/:runId/messages` | `{ requestId, body, recipientId?, mentions }`; durable message and addressed delivery |
+| `POST /api/runs/:runId/stop` | Request cleanup independent of browser lifetime |
 
-Additions to the original plan's contract:
-
-- `USER_ID = "user"` names the operator. It can appear in `from`/`to` of `message.sent` for
-  the DM with the orchestrator. It is not an agent and gets no inbox.
-- `message.sent` has an optional `clientRequestId`, echoing the id from the POST, so the
-  dashboard can match its "sending…" bubble to the recorded message. Retrying with the same
-  id must not create a duplicate.
-- After a POST, the backend records `message.sent` from `user` plus a `delivery.queued` for
-  the orchestrator, and wakes it like any DM.
+Retries reuse request IDs. Sending bubbles remain pending until the persisted event
+arrives; errors are visible and can be retried. Agent session output is labeled as
+such, distinct from explicit team/DM messages.
 
 ## Checks
+
+Browser validation against the real Fastify API and a local MongoDB replica set
+covered first-message run creation, a persisted follow-up, replay after reload and
+the stop request. No Temporal worker, model inference or Modal sandbox was running
+in this browser check. Cloud execution is covered separately by the runtime tests
+and the documented integration checks.
+
+![New conversation and optional settings](../docs/screenshots/new-conversation.jpg)
+![Persisted messages after reload, local API check](../docs/screenshots/live-run-local-api.jpg)
 
 ```bash
 pnpm typecheck
@@ -159,13 +161,12 @@ pnpm build
 ```
 src/contract/events.ts   event types + zod schemas + the send-message request
 src/state/               reduce.ts (pure fold), runStore.ts, chat.ts, selectors.ts
-src/sources/             live SSE source, in-browser mock source, mockRun (shared with fake-sse)
+src/sources/             live SSE source, in-browser mock source, mockRun (offline fixtures)
 src/canvas/              geometry, nodes, edges, activity engine + layer
 src/chat/                chat panel and composer
 src/ui/avatars.ts        avatar pool + per-run assignment
 src/inspector/           details drawer: summary, tasks, git, agent detail
 fixtures/                TypeScript fixture builder and the four fixtures
-scripts/fake-sse.ts      local mock backend
 scripts/generate-avatars.ts  regenerates src/assets/avatars
 tests/                   vitest
 ```
@@ -197,7 +198,6 @@ Implementation details:
 
 ## Not done yet
 
-- Connecting to the real backend, including its implementation of the messages endpoint.
-- Screenshots at 1280×720 and 1920×1080 for review. Playwright isn't installed; layouts were
-  checked by hand in a browser.
+- Hosted browser authentication; the included operator gateway is for local development.
+- Additional layout checks at 1920×1080; the included browser captures use a 1280px viewport.
 - Reduced motion is unit-tested only; it wasn't checked in a browser with the setting on.

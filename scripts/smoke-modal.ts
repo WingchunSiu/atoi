@@ -51,6 +51,9 @@ async function invoke(stage: "first" | "second", checkpoint: string | null) {
       invocationId: `smoke-${stage}`,
       generation: stage === "first" ? 1 : 2,
       role: agent.role,
+      kind: "worker",
+      orchestratorId: "smoke-orchestrator",
+      workerLimit: 1,
       instructions: agent.instructions,
       prompt:
         stage === "first"

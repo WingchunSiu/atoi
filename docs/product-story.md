@@ -70,6 +70,7 @@ atoi's capabilities follow from that thesis:
 | -------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Retained agent sessions    | Ask new questions of the same agent after its initial task; restore confirmed context between turns.             |
 | Separate cloud workspaces  | Run investigations, code and tests independently, with files and tools available in each living sandbox.         |
+| Filesystem working memory  | Keep detailed notes, inputs and reproducible experiments outside the model window; inspect them when needed.     |
 | Direct peer messages       | Let the member with the question consult the relevant peer without relaying every exchange through the planner.  |
 | Shared authoritative state | Coordinate ownership, dependencies, handoffs and versioned evidence while keeping each agent's session distinct. |
 | Durable scheduling         | Wait between turns and resume on messages or timers without keeping a model invocation open.                     |
@@ -78,6 +79,14 @@ Independent work can use compute in parallel. Retained sessions also keep multip
 focused contexts available for later collaboration, even when agents take turns
 executing. A question can be answered where the relevant context resides, and the
 requester receives the information needed for its next step.
+
+The filesystem is part of this context design. Agents can keep detailed inputs,
+notes, code and experiments in their workspaces, and publish shared artifacts in
+Git. A handoff can carry a specific question, a concise answer and references to
+the exact artifact version. The recipient can inspect the source and return to
+its author for another question. This reduces dependence on a single compressed
+summary; whether it reduces information loss or cost requires measurement.
+See [filesystem context, persistent VMs and context scaling](context-scaling.md).
 
 This does not create one model with an unlimited context window. Each agent still
 has context limits and may compact its session. Communication consumes tokens and

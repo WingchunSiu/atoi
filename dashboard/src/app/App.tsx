@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
-import { type Resolved, resolveSource } from "../sources/resolve";
+import { type Resolved, resolveSource, sourceKindFromUrl } from "../sources/resolve";
+import { NewChat } from "./NewChat";
 import { RunView } from "./RunView";
 
 function Message({ title, children }: { title: string; children?: React.ReactNode }) {
@@ -21,7 +22,12 @@ function Message({ title, children }: { title: string; children?: React.ReactNod
 export function App() {
   const [resolved, setResolved] = useState<Resolved | { kind: "loading" }>({ kind: "loading" });
 
+  const launch =
+    sourceKindFromUrl(location.search) === "live" &&
+    (!new URLSearchParams(location.search).get("run") ||
+      new URLSearchParams(location.search).has("new"));
   useEffect(() => {
+    if (launch) return;
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = async () => {
@@ -39,13 +45,14 @@ export function App() {
       abort.abort();
       clearTimeout(timer);
     };
-  }, []);
+  }, [launch]);
 
+  if (launch) return <NewChat />;
   switch (resolved.kind) {
     case "loading":
       return <Message title="Connecting…" />;
     case "no-runs":
-      return <Message title="No runs yet. Start one from the CLI and it will appear here." />;
+      return <NewChat />;
     case "error":
       return (
         <Message title="Couldn't reach the backend.">

@@ -2,7 +2,23 @@ import type { NewRun, NewTask, TaskResult } from "./schemas.js";
 
 export interface Run extends NewRun {
   _id: string;
-  status: "active" | "stopping" | "stopped";
+  status: "active" | "completing" | "stopping" | "stopped" | "completed" | "failed";
+  finalStatus?: "stopped" | "completed" | "failed";
+  endedAt?: Date;
+  archivedAt?: Date;
+  failure?: string;
+  completion?: {
+    requestId: string;
+    fingerprint: string;
+    invocationId: string;
+    generation: number;
+    finalCommit?: string;
+    outcome: string;
+    evidence?: string[];
+    deadline: Date;
+    status: "pending" | "checkpointed" | "failed";
+    error?: string;
+  };
   deadline: Date;
   eventSequence?: number;
   maxInvocationsPerAgent: number;
@@ -26,6 +42,7 @@ export interface Agent {
   checkpointId: string | null;
   invocationId: string | null;
   tokenHash: string;
+  spawnRequestHash?: string;
   createdAt: Date;
 }
 export type PublicAgent = Omit<Agent, "tokenHash">;
@@ -47,7 +64,7 @@ export interface Task extends NewTask {
   reviewerId: string | null;
   version: number;
   result?: TaskResult;
-  review?: { commit: string; verification: string };
+  review?: { commit?: string; verification: string };
   reason?: string;
   createdAt: Date;
   updatedAt: Date;
@@ -84,7 +101,7 @@ export interface OutboxEvent {
   runId: string;
   recipientId: string;
   deliveryId?: string;
-  kind: "mailbox_wakeup" | "stop";
+  kind: "run_start" | "agent_start" | "run_completion" | "mailbox_wakeup" | "stop";
   status: "pending" | "sent";
   attempts?: number;
   error?: string;

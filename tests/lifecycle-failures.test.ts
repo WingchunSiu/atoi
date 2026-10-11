@@ -8,10 +8,10 @@ import { MongoMemoryReplSet } from "mongodb-memory-server-core";
 import { afterAll, beforeAll, expect, it } from "vitest";
 import { sha256 } from "../src/agent/runtime.js";
 import { createServer } from "../src/api/server.js";
-import { runInput } from "../src/contracts/runtime.js";
 import { MongoStore } from "../src/store/mongo.js";
 import { createActivities } from "../src/temporal/activities.js";
 import { reconcile } from "../src/temporal/relay.js";
+import { fixtureTeam } from "./runtime-fixture.js";
 
 let database: MongoMemoryReplSet;
 let mongo: MongoClient;
@@ -44,16 +44,9 @@ afterAll(async () => {
 async function fixture(count = 1) {
   const store = new MongoStore(mongo, mongo.db(`atoi_failure_${randomUUID()}`), secret);
   await store.initialize();
-  const team = await store.createRun(
-    runInput.parse({
-      requestId: randomUUID(),
-      objective: "Exercise lifecycle failure boundaries",
-      repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      agents: Array.from({ length: count }, (_, i) => ({
-        role: `worker_${i}`,
-        instructions: "Wait",
-      })),
-    }),
+  const team = await fixtureTeam(
+    store,
+    Array.from({ length: count }, (_, i) => ({ role: `worker_${i}`, instructions: "Wait" })),
   );
   return { store, ...team };
 }
@@ -163,7 +156,10 @@ it("reconciles a failed workflow when its failure-report Activity could not pers
     taskQueue,
     workflowsPath,
     activities: {
+      superviseRun: async () => ({ finished: false, nextCheckMs: 60000 }),
+      nextWakeup: async () => 60000,
       turn: async (agentId: string) => {
+        if (agentId !== agent._id) return { work: false };
         turns++;
         await store.beginInvocation(agentId, "interrupted-attempt");
         throw ApplicationFailure.nonRetryable("Fixture terminal execution failure");
@@ -284,6 +280,7 @@ it("does not confirm cleanup while provisioning can still create a late guest", 
       finishCreating();
       await reconcile(store, temporal.client, taskQueue);
       await temporal.client.workflow.getHandle(`cleanup/${agent._id}`).result();
+      await temporal.client.workflow.getHandle(`cleanup/${run.orchestratorId}`).result();
       expect((await store.getRun(run._id)).status).toBe("stopped");
       expect(live.size).toBe(0);
     } finally {
@@ -319,6 +316,7 @@ it("preserves a committed checkpoint when the Activity completion acknowledgemen
     activities: {
       ...activities,
       turn: async (agentId: string) => {
+        if (agentId !== agent._id) return { work: false };
         if (++turns > 1) {
           followedUp();
           return { work: false };
@@ -393,5 +391,6 @@ it("does not clear another overlapping provisioning attempt when one retry settl
   await expect(activities.stopAgent(agent._id)).rejects.toThrow("provisioning");
   await store.endProvisioning(invocation._id, second);
   await activities.stopAgent(agent._id);
+  await activities.stopAgent(run.orchestratorId!);
   expect((await store.getRun(run._id)).status).toBe("stopped");
 });

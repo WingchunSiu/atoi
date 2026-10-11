@@ -6,8 +6,9 @@ the demo needs to continue without a developer's laptop. Neither topology change
 the agent runtime or requires a new orchestration design.
 
 This is the deployment design. The backend, Temporal worker and Modal/Pi runtime
-now have a first implementation; the browser client and hosted deployment remain
-planned. See [runtime status and verification](runtime.md) for the exact limits.
+now have a first implementation, including a live browser client and local operator
+gateway. Hosted deployment remains planned. See [runtime status and verification](runtime.md)
+for the exact limits.
 
 ## Two meanings of orchestration
 

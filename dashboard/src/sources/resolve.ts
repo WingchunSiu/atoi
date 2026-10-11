@@ -11,7 +11,7 @@ export type Resolved =
 
 export function sourceKindFromUrl(search: string): SourceKind {
   const p = new URLSearchParams(search).get("source");
-  const k = p ?? import.meta.env.VITE_DEFAULT_SOURCE ?? "mock";
+  const k = p ?? import.meta.env.VITE_DEFAULT_SOURCE ?? "live";
   return k === "live" ? "live" : "mock";
 }
 

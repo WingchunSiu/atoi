@@ -13,10 +13,83 @@ export function coordinationTools(
   invocationId: string,
   sessionId?: string,
   secrets: (string | undefined)[] = [],
+  kind: "orchestrator" | "worker" = "worker",
 ): ToolDefinition[] {
   const requestId = (callId: string) =>
     createHash("sha256").update(`${invocationId}:${callId}`).digest("hex");
   return [
+    defineTool({
+      name: "get_run",
+      label: "Inspect run",
+      description: "Read the objective, repository, worker limit, deadline and completion state.",
+      parameters: Type.Object({}),
+      execute: async (_id, _params, signal) =>
+        result(await backend.request("", "GET", undefined, signal)),
+    }),
+    defineTool({
+      name: "schedule_wakeup",
+      label: "Schedule a follow-up",
+      description:
+        "Schedule a durable self-wakeup after a delay. End this turn; Temporal waits, without keeping Pi or a shell sleep open. At most five pending timers; timers end with the run.",
+      parameters: Type.Object({
+        delaySeconds: Type.Integer({ minimum: 1, maximum: 3600 }),
+        note: Type.String({ minLength: 1, maxLength: 4000 }),
+      }),
+      execute: async (callId, params, signal) =>
+        result(
+          await backend.request(
+            "/wakeups",
+            "POST",
+            { ...params, requestId: requestId(callId) },
+            signal,
+          ),
+        ),
+    }),
+    ...(kind === "orchestrator"
+      ? [
+          defineTool({
+            name: "spawn_agent",
+            label: "Spawn a worker",
+            description:
+              "Reserve a worker with dynamically chosen role and task instructions. Provisioning is asynchronous. The backend enforces capacity including pending workers; workers cannot spawn.",
+            parameters: Type.Object({
+              role: Type.String({ minLength: 1, maxLength: 100 }),
+              instructions: Type.String({ minLength: 1, maxLength: 16000 }),
+            }),
+            execute: async (callId, params, signal) =>
+              result(
+                await backend.request(
+                  "/agents",
+                  "POST",
+                  { ...params, requestId: requestId(callId) },
+                  signal,
+                ),
+              ),
+          }),
+          defineTool({
+            name: "finish_run",
+            label: "Complete the run",
+            description:
+              "Complete the overall objective after recorded tasks and any requested reviews are done. Supply an outcome and optional evidence/commit. Call as your final action and end the turn; cleanup waits for your confirmed checkpoint.",
+            parameters: Type.Object({
+              finalCommit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
+              outcome: Type.String({ minLength: 1, maxLength: 8000 }),
+              evidence: Type.Optional(
+                Type.Array(Type.String({ minLength: 1, maxLength: 2000 }), { maxItems: 20 }),
+              ),
+            }),
+            execute: async (callId, params, signal) =>
+              result(
+                await backend.request(
+                  "/finish",
+                  "POST",
+                  { ...params, requestId: requestId(callId) },
+                  signal,
+                ),
+              ),
+          }),
+        ]
+      : []),
     defineTool({
       name: "write_work_log",
       label: "Record working notes",
@@ -187,10 +260,41 @@ export function coordinationTools(
         ),
     }),
     defineTool({
+      name: "finish_task",
+      label: "Complete your task",
+      description:
+        "Finish an owned in-progress task with a useful summary and optional evidence. Supply reviewerId only if peer review is wanted; that submits in_review instead. Task completion leaves you available within the run. Use the latest version.",
+      parameters: Type.Object({
+        taskId: Type.String(),
+        expectedVersion: Type.Integer({ minimum: 1 }),
+        summary: Type.String({ minLength: 1, maxLength: 8000 }),
+        verification: Type.Optional(Type.String({ minLength: 1, maxLength: 8000 })),
+        evidence: Type.Optional(
+          Type.Array(Type.String({ minLength: 1, maxLength: 2000 }), { maxItems: 20 }),
+        ),
+        commit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
+        reviewerId: Type.Optional(Type.String()),
+      }),
+      execute: async (_id, { taskId, expectedVersion, reviewerId, ...taskResult }, signal) =>
+        result(
+          await backend.request(
+            `/tasks/${encodeURIComponent(taskId)}`,
+            "PATCH",
+            {
+              expectedVersion,
+              reviewerId,
+              status: reviewerId ? "in_review" : "done",
+              result: taskResult,
+            },
+            signal,
+          ),
+        ),
+    }),
+    defineTool({
       name: "update_task",
       label: "Update task",
       description:
-        "Use the latest expectedVersion. Owner submits a result and another agent as reviewer. Only the assigned reviewer can approve the exact submitted commit or request changes. Evidence is agent-reported until independently checked.",
+        "Use the latest expectedVersion. Owner may finish directly with a result, or submit in_review with a reviewerId. Only that reviewer may resolve a requested review: send status done with review: {verification, commit?}, never result. Omit commit for a non-code result. Verify the submitted commit when present. Evidence is agent-reported until independently checked.",
       parameters: Type.Object({
         taskId: Type.String(),
         expectedVersion: Type.Integer({ minimum: 1 }),
@@ -204,14 +308,17 @@ export function coordinationTools(
         reviewerId: Type.Optional(Type.String()),
         result: Type.Optional(
           Type.Object({
-            commit: Type.String({ pattern: "^[a-f0-9]{40}$" }),
+            commit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
             summary: Type.String(),
-            verification: Type.String(),
+            verification: Type.Optional(Type.String()),
+            evidence: Type.Optional(
+              Type.Array(Type.String({ minLength: 1, maxLength: 2000 }), { maxItems: 20 }),
+            ),
           }),
         ),
         review: Type.Optional(
           Type.Object({
-            commit: Type.String({ pattern: "^[a-f0-9]{40}$" }),
+            commit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
             verification: Type.String(),
           }),
         ),

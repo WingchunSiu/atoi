@@ -5,34 +5,58 @@ export const repositoryUrl = z.url().refine((value) => {
   const url = new URL(value);
   return url.protocol === "https:" && !url.username && !url.password;
 }, "Use an HTTPS Git URL without embedded credentials");
-export const runInput = z.object({
-  requestId: id,
-  objective: z.string().min(1).max(16_000),
-  repositoryUrl,
-  agents: z
-    .array(
-      z.object({
-        role: z.string().min(1).max(100),
-        instructions: z.string().max(16_000),
-      }),
-    )
-    .min(1)
-    .max(8),
-  lifetimeSeconds: z
-    .number()
-    .int()
-    .min(60)
-    .max(23 * 60 * 60)
-    .default(3600),
-  maxInvocationsPerAgent: z.number().int().min(1).max(100).default(20),
-});
+export const runInput = z
+  .object({
+    requestId: id,
+    objective: z.string().min(1).max(16_000),
+    repositoryUrl: repositoryUrl.optional(),
+    workerLimit: z.number().int().min(0).max(8).default(2),
+    lifetimeSeconds: z
+      .number()
+      .int()
+      .min(60)
+      .max(23 * 60 * 60)
+      .default(3600),
+    maxInvocationsPerAgent: z.number().int().min(1).max(100).default(20),
+  })
+  .strict();
 export type RunInput = z.infer<typeof runInput>;
+
+export const spawnInput = z
+  .object({
+    requestId: id,
+    role: z.string().trim().min(1).max(100),
+    instructions: z.string().trim().min(1).max(16_000),
+  })
+  .strict();
+export type SpawnInput = z.infer<typeof spawnInput>;
+
+export const finishInput = z
+  .object({
+    requestId: id,
+    finalCommit: z
+      .string()
+      .regex(/^[a-f0-9]{40}$/)
+      .optional(),
+    outcome: z.string().trim().min(1).max(8000),
+    evidence: z.array(z.string().trim().min(1).max(2000)).max(20).optional(),
+  })
+  .strict();
+export type FinishInput = z.infer<typeof finishInput>;
+
+export const wakeupInput = z
+  .object({
+    requestId: id,
+    delaySeconds: z.number().int().min(1).max(3600),
+    note: z.string().trim().min(1).max(4000),
+  })
+  .strict();
 
 export const sendInput = z.object({
   requestId: id,
   body: z.string().min(1).max(32_000),
   recipientId: id.optional(),
-  mentions: z.array(id).max(8).default([]),
+  mentions: z.array(id).max(9).default([]),
 });
 export type SendInput = z.infer<typeof sendInput>;
 
@@ -56,6 +80,9 @@ export const workerRequest = z.object({
   invocationId: id,
   generation: z.number().int().positive(),
   role: z.string().min(1).max(100),
+  kind: z.enum(["orchestrator", "worker"]),
+  orchestratorId: id,
+  workerLimit: z.number().int().min(0).max(8),
   instructions: z.string().max(16_000),
   prompt: z.string().min(1).max(200_000),
   backendUrl: z.url(),

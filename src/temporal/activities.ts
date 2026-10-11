@@ -35,7 +35,8 @@ export function createActivities(
         let agent = await store.getAgent(agentId);
         if (!agent.runtimeEnabled) return { work: false };
         const run = await store.getRun(agent.runId);
-        if (run.status !== "active" || run.deadline <= new Date()) return { work: false };
+        if (!["active", "completing"].includes(run.status) || run.deadline <= new Date())
+          return { work: false };
         const invocationId = createHash("sha256")
           .update(
             `${context.info.workflowExecution?.runId ?? "standalone"}:${context.info.activityId}`,
@@ -74,6 +75,9 @@ export function createActivities(
               invocationId: invocation._id,
               generation: invocation.generation,
               role: agent.role,
+              kind: agent.kind,
+              orchestratorId: run.orchestratorId!,
+              workerLimit: run.workerLimit,
               instructions: agent.instructions,
               prompt: invocation.prompt,
               checkpoint: await store.checkpoint(agent),
@@ -108,7 +112,10 @@ export function createActivities(
         // If publication fails, an Activity retry asks the same guest invocation for
         // its cached result. It does not acknowledge the inbox before this commit.
         await store.complete(agentId, result);
-        return { work: result.outcome === "completed" };
+        return {
+          work:
+            result.outcome === "completed" && (await store.getRun(agent.runId)).status === "active",
+        };
       } finally {
         clearInterval(timer);
       }
@@ -150,7 +157,54 @@ export function createActivities(
       return { work: false };
     },
     async expireRun(runId: string): Promise<void> {
-      await store.stopRun(runId);
+      await store.stopRun(runId, "failed", "Run deadline expired or supervisor was stopped");
+    },
+    async nextWakeup(agentId: string): Promise<number> {
+      const agent = await store.getAgent(agentId);
+      if (["needs_inspection", "stopped"].includes(agent.status)) return 60000;
+      const timer = await store.wakeups
+        .find({ agentId, status: "pending" })
+        .sort({ wakeAt: 1 })
+        .limit(1)
+        .next();
+      return timer ? Math.max(0, timer.wakeAt.getTime() - Date.now()) : 60000;
+    },
+    async superviseRun(runId: string): Promise<{ finished: boolean; nextCheckMs: number }> {
+      const run = await store.getRun(runId);
+      if (!["active", "completing"].includes(run.status)) return { finished: true, nextCheckMs: 0 };
+      const orchestrator = run.orchestratorId ? await store.getAgent(run.orchestratorId) : null;
+      if (run.status === "completing" && run.completion) {
+        const completion = run.completion;
+        if (completion.status === "checkpointed") {
+          await store.stopRun(runId, "completed");
+          return { finished: true, nextCheckMs: 0 };
+        }
+        if (
+          completion.status === "failed" ||
+          orchestrator?.status === "needs_inspection" ||
+          completion.deadline <= new Date()
+        ) {
+          await store.stopRun(
+            runId,
+            "failed",
+            completion.error ?? "Final orchestrator checkpoint failed or timed out",
+          );
+          return { finished: true, nextCheckMs: 0 };
+        }
+        return {
+          finished: false,
+          nextCheckMs: Math.max(1, Math.min(1000, completion.deadline.getTime() - Date.now())),
+        };
+      }
+      if (orchestrator?.status === "needs_inspection") {
+        await store.stopRun(
+          runId,
+          "failed",
+          "Orchestrator failed; pending effects require inspection",
+        );
+        return { finished: true, nextCheckMs: 0 };
+      }
+      return { finished: false, nextCheckMs: 60000 };
     },
   };
 }
