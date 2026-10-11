@@ -1,0 +1,178 @@
+@import "tailwindcss";
+
+/* Tokens sampled from the mesh sketch. --line is darker than the sketch so it survives a projector. */
+@theme {
+  --color-paper: #eae7de;
+  --color-card: #f3f1ea;
+  --color-hub: #dbd9d2;
+  --color-ink: #292a27;
+  --color-muted: #5b625f;
+  --color-line: #72726d;
+  --color-accent: #3b6d84;
+  --color-accent-tint: #d5d9d4;
+  --color-amber: #8a5a12;
+  --color-amber-tint: #efe2c6;
+  --color-red: #9b3426;
+  --color-red-tint: #f1dcd5;
+  --color-green: #3f6b3a;
+
+  --font-mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+
+  /* 13px is the floor: nothing smaller. */
+  --text-chip: 13px;
+  --text-chip--line-height: 18px;
+  --text-body: 14px;
+  --text-body--line-height: 20px;
+  --text-title: 16px;
+  --text-title--line-height: 22px;
+  --text-lead: 18px;
+  --text-lead--line-height: 24px;
+
+  --radius-box: 2px;
+}
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    margin: 0;
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+    -webkit-font-smoothing: antialiased;
+  }
+  button {
+    cursor: pointer;
+  }
+  :focus-visible {
+    outline: 2px solid var(--color-accent);
+    outline-offset: 2px;
+  }
+}
+
+/* --muted on --hub is 4.4:1, just under AA, so muted text inside selected or hovered rows uses ink. */
+.bg-hub .text-muted,
+.hover\:bg-hub:hover .text-muted {
+  color: var(--color-ink);
+}
+
+/* React Flow: keep the base styles quiet. */
+.react-flow {
+  --xy-background-color: transparent;
+}
+.react-flow__node {
+  cursor: default;
+}
+.react-flow__attribution {
+  background: transparent !important;
+  font-size: 10px;
+  opacity: 0.6;
+}
+.react-flow__attribution a {
+  color: var(--color-muted) !important;
+}
+.react-flow__edge-path {
+  transition: stroke 150ms ease-out;
+}
+.react-flow__handle {
+  opacity: 0;
+  pointer-events: none;
+  min-width: 1px;
+  min-height: 1px;
+  width: 1px;
+  height: 1px;
+  border: 0;
+}
+
+/* --- motion (section 7.6) ------------------------------------------------- */
+
+@keyframes atoi-pulse {
+  from {
+    transform: scale(1);
+    opacity: 0.9;
+  }
+  to {
+    transform: scale(1.18, 1.32);
+    opacity: 0;
+  }
+}
+.atoi-pulse {
+  position: absolute;
+  inset: -3px;
+  border: 2.5px solid var(--color-accent);
+  border-radius: 2px;
+  pointer-events: none;
+  animation: atoi-pulse 600ms ease-out forwards;
+}
+
+@keyframes atoi-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.atoi-fade-in {
+  animation: atoi-fade-in 300ms ease-out;
+}
+
+@keyframes atoi-gen-flash {
+  from {
+    background: var(--color-amber-tint);
+  }
+  to {
+    background: transparent;
+  }
+}
+.atoi-gen-flash {
+  animation: atoi-gen-flash 3s ease-out;
+}
+
+@keyframes atoi-draw {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+.atoi-draw {
+  stroke-dasharray: 1;
+  animation: atoi-draw 300ms ease-out forwards;
+}
+
+@keyframes atoi-live-dot {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+.atoi-live-dot {
+  animation: atoi-live-dot 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .atoi-pulse,
+  .atoi-fade-in,
+  .atoi-gen-flash,
+  .atoi-draw,
+  .atoi-live-dot {
+    animation: none;
+  }
+  .atoi-gen-flash {
+    background: var(--color-amber-tint);
+  }
+  .react-flow__edge-path {
+    transition: none;
+  }
+}

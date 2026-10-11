@@ -154,6 +154,16 @@ first use may download the Temporal executable.
 
 Build output goes to `dist/`. Run the compiled service with `pnpm start`.
 
+## Dashboard
+
+A browser dashboard for watching a run and messaging the orchestrator lives in
+[`dashboard/`](dashboard/README.md). It runs on scripted mock data and a local fake event
+stream; it is not connected to the coordination service yet.
+
+```sh
+pnpm --filter atoi-dashboard dev
+```
+
 ## Design and contributing
 
 - [Shared state and messaging contract](docs/state-and-messaging.md)
