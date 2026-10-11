@@ -18,17 +18,27 @@ recovery guarantee. Verify Modal lifecycle behavior before promising pause/resum
 Use TypeScript, Node.js and Fastify for the coordination backend, the official
 MongoDB Node driver for Atlas, and Modal's SDK for sandbox lifecycle operations.
 The backend manages durable inboxes, task ownership, admission limits and API
-connections. Use the Temporal TypeScript SDK for durable per-agent workflows,
-timers, retries, cancellation and sandbox lifecycle Activities. Run the Temporal
-worker outside agent sandboxes. Pin SDK versions and verify real integrations.
+connections. Use the Temporal TypeScript SDK for a durable run supervisor,
+per-agent workflows, timers, retries, cancellation and sandbox lifecycle Activities.
+Run the Temporal worker outside agent sandboxes. Pin SDK versions and verify real
+integrations.
+
+The main harness is the trusted backend system: Fastify, the Temporal worker and
+the outbox/reconciler. It owns all application Atlas access and Modal provider API
+calls. Agents use scoped backend tools for coordination, events and checkpoints;
+they do not access Atlas or invoke peer sandboxes directly. Model calls and Git
+access from the sandbox remain separate. Assume runs stay below 24 hours for now;
+configure explicit sandbox timeouts but defer proactive lifetime rotation.
 
 Agents communicate through a Slack-like team channel and peer DMs. Every agent
 can discover peers, create tasks, claim work and update progress. Initial roles
 guide behavior without restricting direct collaboration. The first milestone includes
 an orchestrator agent that assigns roles, spawns workers, seeds tasks, monitors
-progress and assesses completion. The CLI launches the orchestrator with the
-objective and limits; the backend admits provisioning requests and Temporal
-Activities execute them.
+progress and assesses completion. The web app launches a run with its objective
+and limits; the backend admits provisioning requests and Temporal Activities
+execute them. Keep the planning agent separate from the trusted control plane:
+Fastify and the Temporal worker are ordinary services, runnable locally or hosted,
+and enforce limits, deadlines and cleanup without relying on agent reasoning.
 
 Git is authoritative for shared project files and artifacts. Agents push task
 branches and exchange immutable commit references through messages and tasks.
@@ -42,10 +52,18 @@ The first test uses two workers, an implementer and reviewer, plus the orchestra
 with no fixed role slots or pair-specific routing. The team completes a bounded task,
 exchanging durable messages and a Git commit, and recovering checkpointed context
 and pending messages after sandbox replacement and Temporal worker restart.
-Start with a CLI and event log; the React/Vite/Tailwind dashboard comes later.
+Include a minimal React/Vite/Tailwind web interface for launching runs, messaging
+the team and inspecting tasks, evidence and lifecycle events. Retain the CLI for
+smoke checks against the same backend API. Browser sessions never own run lifetime.
 We reuse Pi's model/tool loop.
 
+The first milestone preserves agents across turns and tasks within a run. Run
+completion archives records and checkpoints and stops compute; resuming the same
+team across completed runs is deferred. Distinguish this limit from the long-term
+product goal of persistent teams.
+
 Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
+See [deployment boundaries](docs/deployment.md) for local and hosted topologies.
 
 ## Working style
 
@@ -111,6 +129,10 @@ Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
   additional spawn and completion tools. Reserve stable agent records and worker
   capacity atomically before provisioning. Deduplicate spawn requests and reconcile
   partial provisioning failures. Only the trusted control plane holds Modal credentials.
+- Give each run a deterministic Temporal supervisor for deadlines, cancellation
+  and finalization. It must clean up resources even when the planning orchestrator
+  fails. The orchestrator requests actions through validated backend tools; it
+  does not own infrastructure credentials or enforce its own execution limits.
 - Use run-scoped agent IDs for discovery, channel membership, task ownership and
   routing. Worker limits are configurable and include pending provisioning. Stop
   or completion must clean up all run sandboxes, including the orchestrator.
@@ -190,6 +212,10 @@ Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
 - Record structured events with agent, task, run and causal references. Capture
   actual messages, tool results, artifacts and verification outcomes; UI animations
   must reflect recorded activity.
+- Serve the browser through authenticated backend APIs. Accept runs durably before
+  returning their IDs, and execute them asynchronously. Replay persisted events
+  after reconnects; refresh or browser closure must not cancel work. Cloud sandboxes
+  need a reachable backend URL even when the control plane runs on a laptop.
 - Track model usage, execution time and failures so the demo's claims are measurable.
 - Add focused tests for consequential behavior: task claims, stale-worker rejection,
   checkpoint recovery, message deduplication and artifact verification. Avoid tests
@@ -215,13 +241,15 @@ Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
 3. Push an implementation commit, fetch it for review and record actual test results.
 4. Verify message/timer wakeups, Temporal worker restart and checkpoint recovery
    after sandbox replacement. State limits on files, processes and interrupted effects.
-5. Show the handoff, final commit, review outcome and failures in the CLI event log.
+5. Let the operator launch, message and stop the team in the web app, and inspect
+   the handoff, final commit, review evidence and failures from persisted events.
 
 Validate claim contention, duplicate requests and checkpoint recovery with focused
 checks, including spawn retry deduplication and concurrent worker-limit enforcement.
 Smoke-test adding a third worker without schema or routing changes. Bound runtime
 and turns, test outbox reconciliation and Activity retry handling, and verify stop
-cleans up all run sandboxes. Defer worker-initiated spawning, automated merging, semantic search, large-swarm load
-testing and the browser dashboard. Compare against a baseline before claiming
+cleans up all run sandboxes even if the orchestrator fails. Defer worker-initiated
+spawning, automated merging, semantic search, large-swarm load testing and elaborate
+UI features. Compare against a baseline before claiming
 better cost or quality. When finishing a task, summarize what changed, how it was
 checked and what remains incomplete.

@@ -4,24 +4,30 @@ Build a working vertical slice of the harness: an orchestrator spawns a configur
 
 ## Scope
 
-A CLI starts a team run with an objective, repository and configurable worker limit, then provisions the orchestrator. The orchestrator assigns initial roles, spawns workers, seeds tasks, monitors progress and assesses completion. All agents can create and claim tasks, post to the team channel, and DM each other. Roles guide behavior without restricting peer communication.
+The web app starts a team run with an objective, repository and configurable worker limit. The backend durably accepts the request and returns a run ID; Temporal provisions the orchestrator asynchronously. The orchestrator assigns initial roles, spawns workers, seeds tasks, monitors progress and assesses completion. All agents can create and claim tasks, post to the team channel, and DM each other. Roles guide behavior without restricting peer communication. The CLI uses the same API for debugging and smoke checks.
 
 The initial fixture uses an implementer and reviewer against a small repository with deterministic tests and a bounded change, such as fixing a parser edge case. These are fixture roles, not hard-coded worker slots. The orchestrator can add workers during a run within its configured limit. Worker-initiated spawning is deferred.
+
+Task completion leaves an agent available for follow-up within the run. Run completion archives records and checkpoints and stops all run compute. Reusing the same team across completed runs is deferred. The milestone proves continuity across turns, tasks and sandbox replacement, rather than indefinite lifetime of a physical sandbox.
 
 ## Architecture
 
 | Component | Implementation and responsibility |
 | --- | --- |
 | Coordination backend | TypeScript, Node.js, and Fastify; task and messaging APIs, admission limits, outbox relay and event log |
-| Durable scheduling | Temporal service and TypeScript worker outside sandboxes; per-agent workflows, timers, retries, cancellation and lifecycle Activities |
+| Durable scheduling | Temporal service and TypeScript worker outside sandboxes; run supervisor, per-agent workflows, timers, retries, cancellation and lifecycle Activities |
 | Shared state | MongoDB Atlas through the official Node driver |
-| Orchestrator | Pi agent in its own Modal sandbox; role assignment, worker spawning, task seeding, progress checks and final assessment |
+| Planning orchestrator | Pi agent in its own Modal sandbox; role assignment, worker spawn requests, task seeding, progress checks and final assessment |
 | Agent worker | TypeScript process embedding the Pi coding-agent SDK; one serialized conversation per agent |
 | Execution | One Modal Sandbox per agent, using a common image with Node.js, Git, and the worker |
 | Project storage | One hosted Git remote; independent clone and task branch in each sandbox |
-| Operator interface | CLI commands and an event log; no browser UI required |
+| Operator interface | React/Vite/Tailwind web app; launch/stop runs, team conversations, tasks, evidence and persisted events; CLI for smoke checks |
+
+The planning orchestrator reasons about the objective. The trusted control plane enforces authorization, capacity, deadlines and cleanup. Fastify and the Temporal worker are ordinary services, not agents, and do not run inside an agent-controlled sandbox. They can run locally for development or on a hosted server; their process identity is not the agent's identity. See [deployment boundaries](deployment.md) for both topologies.
 
 Workers call authenticated backend APIs using credentials scoped to their run and agent. The backend and trusted Temporal worker hold the control-plane credentials; sandboxes receive no Atlas, Modal or Temporal credentials. Each sandbox receives Git access scoped to the demo repository. Agents receive file and shell tools plus custom coordination tools.
+
+The main harness comprises Fastify, the trusted Temporal worker and the outbox/reconciler. It owns all application Atlas access and Modal provider API calls. Agent coordination, events and checkpoints pass through this backend system; agents never query Atlas or invoke a peer sandbox directly. The Temporal worker can use provider SDKs directly within this boundary. Model calls and Git access from guests are separate from coordination traffic; a gateway for those is outside the initial design.
 
 Git is authoritative for project files and artifacts. Atlas is authoritative for task state, mailboxes, agent records and session checkpoints. Temporal owns durable scheduling and lifecycle decisions, using its own service and history store; Atlas is not its persistence backend. Repository metadata in Atlas references commits and paths rather than duplicating the working tree.
 
@@ -31,7 +37,7 @@ Use separate documents for messages, deliveries, and events rather than unbounde
 
 | Collection | Minimum contents |
 | --- | --- |
-| `runs` | Objective, repository, orchestrator ID, worker limit, status, and execution limits |
+| `runs` | Start request ID, objective, repository, orchestrator ID, supervisor workflow ID, worker limit, status, and execution limits |
 | `agents` | Run, role, stable workflow ID, sandbox reference, invocation generation, heartbeat, and session checkpoint reference |
 | `tasks` | Description, acceptance criteria, status, owner, dependencies, and result commit |
 | `channels` | Run and participants; one team channel and peer DMs |
@@ -48,11 +54,13 @@ The orchestrator additionally receives `spawn_agent` and `finish_run`. Spawning 
 
 Store agents as run-scoped records and address messages by agent ID. Team membership grows as workers join; DMs support any peer pair. Task ownership and delivery use IDs rather than implementer/reviewer-specific fields. Apply limits to the whole run, and stop every sandbox recorded for it, including the orchestrator and partially provisioned workers.
 
-The orchestrator reads task and verification results before calling `finish_run` with the final commit and outcome. The backend checks required tasks are done and durably queues completion. Cleanup waits for the orchestrator invocation to checkpoint and finish, then Temporal stops the run’s agents and records cleanup outcomes. The orchestrator need not relay ordinary peer exchanges. This milestone does not establish large-swarm performance.
+The orchestrator reads task and verification results before calling `finish_run` with the final commit and outcome. The backend checks required tasks are done and have recorded verification against that exact pushed commit, then durably queues completion. An agent's unsupported success claim is insufficient. Normal completion waits for the orchestrator invocation to checkpoint and finish, then the run supervisor stops the run's agents and records cleanup outcomes. A failed or overdue final checkpoint becomes an explicit failure and cannot prevent bounded cleanup. The orchestrator need not relay ordinary peer exchanges. This milestone does not establish large-swarm performance.
 
 For this milestone, task ownership survives a disconnect. The operator can explicitly reassign abandoned work; automatic reassignment is deferred.
 
 ## Durable lifecycle and recovery
+
+Create one deterministic Temporal supervisor with stable ID `run/<runId>`. It starts the orchestrator through Activities, waits for completion requests, cancellation or the run deadline, and drives idempotent finalization and resource cleanup. The supervisor is application code, not an LLM agent. Reconcile provisioned resources from Atlas so cleanup includes partial starts and still works if the orchestrator sandbox fails. Provisioning must check the run is active; a resource created during a stop race is recorded and cleaned up rather than admitted into a closed run.
 
 Create one Temporal workflow with stable ID `agent/<agentId>` for every agent, including the orchestrator. The workflow serializes bounded invocations and waits for mailbox notifications or timers between them. Pi remains inside Modal; the Temporal worker is a separate control-plane process. Peer waits happen in the workflow, without holding a Pi invocation open or polling from the sandbox.
 
@@ -62,19 +70,26 @@ Persist each message, addressed delivery and outbox event in one short Atlas tra
 
 Before each Pi invocation, claim its deliveries and assign a stable invocation ID and generation. Retries inspect that invocation before starting work again. The sandbox worker must reject overlapping invocations and reuse a confirmed result for the same ID. Persist native Pi session data and conditionally publish the checkpoint with delivery completion in Atlas. Use chunked data if needed, publishing the manifest only after its contents are durable. Delivery is at least once, not exactly-once execution of shell commands. If the worker disappears after an unconfirmed external effect, mark the invocation for inspection instead of automatically rerunning it. Stop or isolate superseded execution before allowing replacement work.
 
-An idle agent retains its identity, mailbox and checkpoint while its workflow waits. Quiesce tools and checkpoint before suspending execution. Verify Modal's supported pause/resume or snapshot lifecycle in the integration spike; do not assume process-memory retention or zero idle cost. If suspension is unavailable, explicitly report the fallback and its cost. The Temporal service and worker remain available for wakeups.
+An idle agent retains its identity, mailbox and checkpoint while its workflow waits. Quiesce tools and checkpoint before suspending execution. Verify Modal's supported pause/resume or snapshot lifecycle in the integration spike; do not assume process-memory retention or zero idle cost. Runs are assumed to remain below 24 hours; proactive lifetime rotation is out of scope. Configure an explicit sandbox timeout for the run budget rather than relying on [Modal's five-minute default](https://modal.com/docs/guide/sandboxes). If suspension is unavailable, explicitly report whether idle compute is retained and billed or replaced from checkpoint, and its recovery limits. The Temporal service and worker must be available to advance wakeups; a stopped worker delays progress until restart.
 
 On sandbox replacement, restore the latest checkpoint, clone the repository, fetch the last pushed work, and resume pending deliveries. Uncommitted files and running processes are outside this milestone's replacement guarantee. Run completion, cancellation and deadlines initiate idempotent cleanup of all agent workflows and sandboxes, including partially provisioned resources. Persist failures so reconciliation can retry cleanup.
 
+## Web interaction
+
+Keep one run page with an objective/repository/limits form, team channel and peer conversations, task list, agent lifecycle states, and recorded verification with links to the exact Git commit. The operator can send a message to the orchestrator or a peer and stop a run. Operator identity is distinct from agent identity; authenticated APIs validate run access and message recipients. A run-detail view restores from Atlas after reload; the browser is not an authoritative inbox or scheduler.
+
+Use a cursor-based persisted event feed, initially SSE, to update the page. Reconnects replay missed events and deduplicate by event ID. Show model/tool activity, result evidence, and observed sandbox state rather than inferred animation. Closing the tab or dropping its connection does not cancel work. CLI commands exercise the same endpoints. Public deployment and elaborate visualization are not required for this milestone.
+
 ## Demonstration flow
 
-1. Start the backend, Temporal service and Temporal worker, then use the CLI to launch the orchestrator with the objective and a two-worker limit. The orchestrator spawns an implementer and reviewer and seeds the task list.
+1. Start the web app, backend, Temporal service and Temporal worker, with a backend URL reachable from Modal. Launch a run in the browser with the objective and a two-worker limit. The orchestrator spawns an implementer and reviewer and seeds the task list; display their recorded events.
 2. The implementer claims an available task, creates follow-up tasks as needed, makes the change, and runs the fixture tests.
 3. It pushes its branch, records the commit and verification notes, and marks the task in review.
 4. It DMs the reviewer with the task ID and commit SHA. The reviewer fetches that exact revision, runs checks, and reports its findings.
 5. If changes are needed, the agents exchange feedback and a new commit. On approval, the reviewer marks the task done. The deliverable is a reviewed branch; merging to the default branch is deferred.
 6. Checkpoint the reviewer and let its workflow wait. Wake it through a DM and a timer in separate checks. Restart the Temporal worker and verify pending work resumes without overlapping Pi invocations. Then replace the reviewer sandbox, queue a follow-up while it is offline, and verify restored context and delivery.
 7. The orchestrator checks task outcomes and verification evidence, reports the final commit and requests run completion. After the orchestrator checkpoints, Temporal cleans up all run sandboxes and the backend exposes the recorded result.
+8. In separate checks, refresh/reconnect the browser without stopping the run, then stop a run with an unavailable orchestrator. Verify bounded cleanup and visible failures; the planning agent is not required for operator cancellation.
 
 ## Acceptance criteria
 
@@ -90,7 +105,8 @@ On sandbox replacement, restore the latest checkpoint, clone the repository, fet
 - An Activity retry after a confirmed checkpoint reuses the result; ambiguous interrupted effects are reported rather than blindly replayed.
 - Replacing a sandbox preserves checkpointed context and pending messages; committed work is recoverable from Git.
 - Record observed Modal idle/resume behavior and recovery limits; distinguish workflow persistence from sandbox memory retention.
-- The CLI shows the full handoff, final commit, review outcome, and any recovery failures.
-- The run has a configurable deadline and turn limit; stopping or completing it terminates every sandbox in the run.
+- The web app starts a run, sends an operator message, shows the full handoff, final commit, actual review evidence and recovery failures, and can stop the run. Refresh/reconnect recovers persisted state and events; tab closure does not cancel work.
+- Retrying a start request returns the same logical run. The CLI uses the same API and provides a reproducible smoke path.
+- The run has a configurable deadline and turn limit; stopping or completing it cleans up every sandbox in the run, including when the orchestrator fails. Interrupted checkpoints and failed cleanup are visible and reconciled.
 
-Completion requires an observed end-to-end run plus focused checks for spawn limits and retries, claim contention, duplicate messages, outbox reconciliation, Temporal worker restart, Activity retry handling, and checkpoint recovery. Worker-initiated spawning, automated merging, semantic search, large-swarm load testing, and the React dashboard belong to later milestones.
+Completion requires an observed end-to-end run plus focused checks for spawn limits and retries, claim contention, duplicate messages, outbox reconciliation, Temporal worker restart, Activity retry handling, checkpoint recovery, browser reconnect and cancellation without the orchestrator. Worker-initiated spawning, automated merging, semantic search, large-swarm load testing, reusable teams across completed runs and elaborate UI features belong to later milestones. The [first runtime slice](runtime.md) implements and checks some foundations; it does not complete this milestone. Its fixtures and unverified cloud integrations are documented separately.

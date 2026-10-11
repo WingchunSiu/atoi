@@ -11,18 +11,19 @@ available for the next conversation.
 The technical idea is to organize inference compute across several retained,
 focused contexts. Agents investigate different parts of a problem, do real work
 in their own sandboxes, and exchange the information they need through direct
-messages. See the [product story and inference-scaling thesis](docs/product-story.md).
+messages. Persistence lets those conversations continue after the first answer.
+See the [product story and inference-scaling thesis](docs/product-story.md).
 
-Code is the first proving ground for this broader product vision. The target
-runtime uses Pi for the model/tool loop, one Modal sandbox per agent, Temporal for
-scheduling, Atlas for coordination and checkpoints, and Git for project artifacts.
-The first full milestone targets an orchestrator plus two workers and a smoke
-check adding a third worker. Team continuity is scoped to a run; reusing the same
-team across completed runs remains future work.
+Code is the first proving ground for this broader product vision. Pi runs the
+model/tool loop; Modal provides one sandbox per agent; Temporal schedules work;
+Atlas holds durable coordination state and checkpoints; Git holds project files
+and artifacts. The first full milestone targets an orchestrator plus two workers
+and a smoke check adding a third worker. Team continuity is scoped to a run;
+reusing the same team across completed runs remains future work.
 
 ## Implemented
 
-The initial TypeScript coordination service provides:
+The unified TypeScript harness provides:
 
 - Scoped bearer authentication and operator bootstrap APIs.
 - Agent registration with atomic worker-capacity limits.
@@ -31,10 +32,23 @@ The initial TypeScript coordination service provides:
 - Atomic message, delivery and outbox writes with request deduplication.
 - A read-only pending inbox and structured audit records.
 
-Temporal consumption, checkpoint publication, Pi execution, Modal provisioning
-and Git verification are not implemented yet. Outbox entries remain pending until
-the Temporal slice is connected. Registration creates logical records only, not
-sandboxes. The service does not execute or verify the test results agents report.
+- Pi coding tools in private Modal workspaces, with bounded model/tool turns.
+- Temporal scheduling, durable outbox reconciliation, per-agent serialization and cleanup.
+- Native Pi session checkpoints published atomically with inbox acknowledgement.
+- Invocation fencing, confirmed-result reuse and explicit inspection of ambiguous failures.
+- Authenticated activity history and SSE APIs, with CLI replay and observation.
+
+The runtime retains each sandbox between turns; idle guests remain alive and billed.
+VM pause/resume and automated sandbox replacement are not implemented. The API's
+bootstrap registration still creates logical agents only; `/operator/runs` starts
+runtime-enabled agents. Task approval requires an independent reviewer of the exact
+commit, but evidence remains agent-reported rather than trusted evaluator output.
+
+Local tests cover the integrated harness with scripted inference and sandbox fixtures.
+Real Atlas + Modal + Pi + live-model E2E passed, including independent review,
+peer wakeup, native checkpoint history, private file reuse and confirmed cleanup.
+The check uses a read-only public Git commit; private Git push remains unverified. See [runtime setup and
+limits](docs/runtime.md).
 
 ## Run locally
 
@@ -46,8 +60,9 @@ pnpm install --frozen-lockfile
 cp .env.example .env
 ```
 
-Set `MONGODB_URI`, `MONGODB_DATABASE` and a random `ADMIN_TOKEN` in `.env`. Generate a
-token with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
+Set `MONGODB_URI`, `MONGODB_DATABASE`, `ADMIN_TOKEN`, `AGENT_TOKEN_SECRET`,
+`BACKEND_PUBLIC_URL`, `PI_PROVIDER` and `PI_MODEL` in `.env`. Generate separate
+operator and agent secrets with `node -e "console.log(require('node:crypto').randomBytes(32).toString('hex'))"`.
 Never commit `.env` or share the operator token with agents. For Atlas, configure
 network access and a database user permitted to read/write the chosen database
 and create its indexes.
@@ -60,17 +75,23 @@ pnpm db:local
 
 It downloads MongoDB 8.2.3 on first use and caches the binary under `.cache/mongodb`.
 It binds only to localhost on port 27017 and discards its data when stopped. The
-example `.env` URI already targets it. Use Atlas for data that must outlive this
+local connection URI is `mongodb://127.0.0.1:27017/?replicaSet=testset`. Use Atlas for data that must outlive this
 local database process.
 
-Start the coordination service:
+Start a durable local Temporal service, then the API and worker in separate terminals:
 
 ```sh
-pnpm dev
+mkdir -p .atoi
+temporal server start-dev --db-filename .atoi/temporal.db
+pnpm dev:api
+pnpm dev:worker
 ```
 
-The default address is `http://127.0.0.1:3000`. Change `HOST` and `PORT` as needed;
-use TLS when exposing the API remotely. The liveness endpoint is `/health`.
+The default address is `http://127.0.0.1:3000`. Change `API_HOST` and `API_PORT` as
+needed. Modal workers require an HTTPS `BACKEND_PUBLIC_URL` reaching this API;
+configure Modal authentication and a model secret before launching real agents.
+The liveness endpoint is `/health`. See [runtime setup](docs/runtime.md) for the
+complete setup, CLI run/message/stop sequence and real E2E command.
 
 ## Coordination demo
 
@@ -83,10 +104,27 @@ pnpm demo
 The script creates a uniquely named run and two logical agents, claims a task,
 sends a DM, reads the recipient inbox, and submits/approves a synthetic result.
 It prints record IDs, never credentials. This is an API demo with fixture evidence;
-no model, Git command or sandbox runs. Its inbox stays pending because there is no
-checkpointing executor yet. Each invocation creates a fresh run and leaves its
+no model, Git command or sandbox runs. Its logical agents are not runtime-enabled,
+so their inbox remains pending. Each invocation creates a fresh run and leaves its
 records for inspection. Use a dedicated demo database; there is no shared-data
 reset command.
+
+## Agent activity APIs and CLI
+
+Pi session messages, visible text, tool output and agent working logs are recorded
+as ordered Atlas events. The CLI can inspect an agent, replay history and watch
+live activity. Working notes are agent reports and do not approve tasks.
+
+```sh
+pnpm cli agent <runId> <agentId>
+pnpm cli history <runId> [agentId] [afterCursor]
+pnpm cli watch <runId> [agentId] [afterCursor]
+```
+
+The browser UI is developed separately against the authenticated backend APIs.
+This runtime includes the activity contract and CLI, with paginated replay and
+reconnecting observation. See [activity APIs and limits](docs/activity.md) and
+[runtime setup](docs/runtime.md).
 
 ## Checks
 
@@ -94,10 +132,12 @@ reset command.
 pnpm check
 pnpm test:unit
 pnpm test:integration
+pnpm test:runtime
 pnpm build
 ```
 
-`pnpm test` runs both suites. Unit checks need no database or network. Integration
+`pnpm test` runs the coordination and runtime/activity suites. Unit checks need no
+database or network. Coordination integration
 tests start a real temporary MongoDB replica set, requiring a binary download on
 first use and local process/socket access. Subsequent runs can reuse the cached
 binary offline. Tests create and remove only their randomly named `atoi_test_*`
@@ -108,7 +148,9 @@ shell; the test command does not load `.env`. It still creates and deletes only 
 unique test database and never uses `MONGODB_DATABASE`. The test identity needs
 index-creation, transaction, `collMod` and database-drop permissions in that test
 database. The rollback test uses a temporary collection validator to force a real
-transaction failure. Local replica-set tests do not establish Atlas cloud access.
+transaction failure. Local replica-set tests do not establish Atlas cloud access. Runtime tests also
+start real local Temporal services and use scripted inference/sandbox fixtures;
+first use may download the Temporal executable.
 
 Build output goes to `dist/`. Run the compiled service with `pnpm start`.
 

@@ -1,2 +1,6 @@
 allowBuilds:
   esbuild@0.28.2: true
+  protobufjs@7.6.6: true
+  "@swc/core@1.16.13": true
+  "@google/genai@2.21.0": false
+  cbor-extract@2.2.2: false

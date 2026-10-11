@@ -1,6 +1,8 @@
 import { timingSafeEqual } from "node:crypto";
 import type { Static } from "@sinclair/typebox";
 import Fastify, { type FastifyError } from "fastify";
+import { ZodError } from "zod";
+import { HarnessError } from "./contracts/runtime.js";
 import { type Actor, Problem } from "./model.js";
 import * as S from "./schemas.js";
 import { type CoordinationStore, hash } from "./store.js";
@@ -21,6 +23,13 @@ export function buildApp(store: CoordinationStore, adminToken: string, logging =
   });
   app.decorateRequest("actor", null);
   app.setErrorHandler<FastifyError>((error, request, reply) => {
+    if (error instanceof ZodError)
+      return reply.code(400).send({
+        error: "invalid_input",
+        message: error.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; "),
+      });
+    if (error instanceof HarnessError)
+      return reply.code(error.statusCode).send({ error: "harness_error", message: error.message });
     if (error instanceof Problem)
       return reply.code(error.statusCode).send({ error: error.code, message: error.message });
     if (error.validation)
@@ -45,12 +54,20 @@ export function buildApp(store: CoordinationStore, adminToken: string, logging =
     const match = /^Bearer ([A-Za-z0-9_-]{32,256})$/.exec(request.headers.authorization ?? "");
     const token = match?.[1];
     if (!token) throw new Problem(401, "unauthorized", "Bearer credentials are required");
-    if (request.routeOptions.url?.startsWith("/admin/")) {
+    if (request.routeOptions.url?.match(/^\/(admin|operator)\//)) {
       if (!timingSafeEqual(Buffer.from(hash(token)), Buffer.from(hash(adminToken))))
         throw new Problem(401, "unauthorized", "Operator credentials are required");
     } else {
       const { runId } = request.params as { runId: string };
-      request.actor = await store.authenticate(token, runId);
+      const invocationId = request.headers["x-invocation-id"];
+      const generation = Number(request.headers["x-agent-generation"]);
+      request.actor = await store.authenticate(
+        token,
+        runId,
+        typeof invocationId === "string" && Number.isInteger(generation) && generation > 0
+          ? { id: invocationId, generation }
+          : undefined,
+      );
     }
   });
   const actor = (value: Actor | null) => {
