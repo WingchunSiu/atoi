@@ -14,6 +14,7 @@ export type RunStatus =
   | "starting"
   | "running"
   | "completing"
+  | "stopping"
   | "completed"
   | "failed"
   | "cancelled";
@@ -40,6 +41,9 @@ export interface Task {
   ownerId?: AgentId;
   dependsOn?: string[];
   resultCommit?: string;
+  resultSummary?: string;
+  verification?: string;
+  evidence?: string[];
 }
 
 export interface Envelope {
@@ -130,7 +134,15 @@ export type DashboardEvent = RunEvent | UnknownEvent;
 // zod schemas
 
 const id = z.string().min(1);
-const runStatus = z.enum(["starting", "running", "completing", "completed", "failed", "cancelled"]);
+const runStatus = z.enum([
+  "starting",
+  "running",
+  "completing",
+  "stopping",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 const agentState = z.enum([
   "provisioning",
   "waiting",
@@ -156,6 +168,9 @@ export const taskSchema = z.object({
   ownerId: id.optional(),
   dependsOn: z.array(id).optional(),
   resultCommit: z.string().optional(),
+  resultSummary: z.string().optional(),
+  verification: z.string().optional(),
+  evidence: z.array(z.string()).optional(),
 });
 
 export const envelopeSchema = z.object({

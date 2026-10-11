@@ -214,7 +214,7 @@ function ensureAgents(
   let agents = state.agents;
   for (const id of ids) {
     // The operator is a chat participant, not an agent.
-    if (!id || id === USER_ID || agents[id]) continue;
+    if (!id || id === USER_ID || id === "harness" || agents[id]) continue;
     if (agents === state.agents) agents = { ...agents };
     agents[id] = placeholder(id, seq, ts);
   }
@@ -376,10 +376,10 @@ const handlers: { [T in DashboardEvent["type"]]?: Handler<T> } = {
     let peerLinks = s.peerLinks;
     // Only DMs between agents grow the mesh. Team messages, @mentions and the operator's
     // DM with the orchestrator never create peer links.
-    if (e.channelKind === "dm" && e.from !== USER_ID) {
+    if (e.channelKind === "dm" && e.from !== USER_ID && e.from !== "harness") {
       peerLinks = { ...peerLinks };
       for (const to of e.to) {
-        if (to === e.from || to === USER_ID) continue;
+        if (to === e.from || to === USER_ID || to === "harness") continue;
         const key = peerKey(e.from, to);
         const link = peerLinks[key];
         const [a, b] = key.split("|") as [AgentId, AgentId];

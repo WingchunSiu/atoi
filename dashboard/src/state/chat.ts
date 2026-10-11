@@ -9,6 +9,7 @@ export type Tone = "default" | "muted" | "red" | "amber" | "green" | "accent";
 
 export type ChatItem =
   | { kind: "message"; key: string; seq: number; ts: string; message: Message }
+  | { kind: "response"; key: string; seq: number; ts: string; agentId: AgentId; text: string }
   | { kind: "milestone"; key: string; seq: number; ts: string; text: string; tone: Tone }
   | {
       kind: "activity";
@@ -25,7 +26,7 @@ export const TEAM = "team";
 
 /** Name for any chat participant, including the operator. */
 export function nameOf(state: RunState, id: AgentId): string {
-  return id === USER_ID ? "you" : roleOf(state, id);
+  return id === USER_ID ? "you" : id === "harness" ? "system" : roleOf(state, id);
 }
 
 export function dmLabel(state: RunState, key: string): string {
@@ -58,7 +59,11 @@ function asItems(messages: Message[]): ChatItem[] {
 /** DMs between exactly this pair, matched by participants rather than channel id. */
 export function dmMessages(state: RunState, key: string): Message[] {
   return state.messages.filter(
-    (m) => m.channelKind === "dm" && peerKey(m.from, m.to[0] ?? "") === key && m.to.length === 1,
+    (m) =>
+      (m.channelKind === "dm" && peerKey(m.from, m.to[0] ?? "") === key && m.to.length === 1) ||
+      (m.channelKind === "team" &&
+        m.from === USER_ID &&
+        m.to.some((id) => peerKey(USER_ID, id) === key)),
   );
 }
 
@@ -81,6 +86,10 @@ export function teamItems(events: readonly DashboardEvent[], state: RunState): C
     let text: string | undefined;
     let tone: Tone = "muted";
     switch (e.type) {
+      case "tool.called":
+        if (e.tool === "response" && e.agentId)
+          items.push({ kind: "response", ...base, agentId: e.agentId, text: e.summary });
+        break;
       case "run.state":
         if (e.status === "starting") text = `Run started${e.objective ? `: ${e.objective}` : ""}`;
         else if (e.status === "completed")
@@ -214,21 +223,31 @@ export function dmItems(
   withActivity: boolean,
 ): ChatItem[] {
   const items: ChatItem[] = asItems(dmMessages(state, key));
-  if (withActivity) {
-    const pair = new Set(key.split("|").filter((id) => id !== USER_ID));
-    for (const e of events) {
-      if (!e.agentId || !pair.has(e.agentId) || e.type === "message.sent") continue;
-      const a = activity(state, e);
-      if (a)
-        items.push({
-          kind: "activity",
-          key: `e:${e.seq}`,
-          seq: e.seq,
-          ts: e.ts,
-          agentId: e.agentId,
-          ...a,
-        });
+  const pair = new Set(key.split("|").filter((id) => id !== USER_ID));
+  for (const e of events) {
+    if (!e.agentId || !pair.has(e.agentId) || e.type === "message.sent") continue;
+    if (e.type === "tool.called" && e.tool === "response" && key.split("|").includes(USER_ID)) {
+      items.push({
+        kind: "response",
+        key: `e:${e.seq}`,
+        seq: e.seq,
+        ts: e.ts,
+        agentId: e.agentId,
+        text: e.summary,
+      });
+      continue;
     }
+    if (!withActivity) continue;
+    const a = activity(state, e);
+    if (a)
+      items.push({
+        kind: "activity",
+        key: `e:${e.seq}`,
+        seq: e.seq,
+        ts: e.ts,
+        agentId: e.agentId,
+        ...a,
+      });
   }
   return items.sort((a, b) => a.seq - b.seq);
 }

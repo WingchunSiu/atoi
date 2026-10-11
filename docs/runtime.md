@@ -9,14 +9,14 @@ operate on the guest's workspace; the trusted runner does not execute them.
 
 | Component | Current behavior |
 | --- | --- |
-| Modal adapter | Common Node/Git/Python image, named sandbox per agent, private Git clone, explicit lifetime, reattachment and termination |
-| Pi worker | Standard SDK resource discovery and coding tools, appended agent identity/instructions, peer/task tools, bounded turns |
+| Modal adapter | Common Node/Git/Python image, named sandbox per agent, optional private Git clone, explicit lifetime, reattachment and termination |
+| Pi worker | Standard SDK resource discovery and coding tools, appended agent identity/instructions, shared collaboration prompt, peer/task tools, orchestrator-only spawn/finish tools, bounded turns |
 | Persistence | Native Pi JSONL in Atlas with a content hash; checkpoint publication and inbox acknowledgement in one transaction |
 | Communication | Team channel and peer DMs; addressed messages/mentions create deliveries and outbox wakeups |
-| Tasks | Atomic claims, task versions/dependencies, independent assigned-reviewer approval of the exact commit |
-| Temporal | Serialized per-agent turns, idle waits, reconciliation timers, run deadline and independent cleanup workflows |
+| Tasks | Atomic claims and owner completion; optional dependencies and assigned peer review; exact commits for code reviews |
+| Temporal | Serialized per-agent turns, durable self-wakeups, completion checkpoint barrier, run deadline and independent cleanup workflows |
 | Harness API | Operator token, agent-scoped tokens, invocation generation checks, persisted events and status inspection |
-| CLI | Start a two-agent fixture, inspect a run, send a follow-up and stop compute |
+| CLI | Start an orchestrator with configurable worker capacity, inspect a run, send a follow-up and stop compute |
 
 Finishing a turn or task leaves the same agent and sandbox available. While idle,
 Temporal waits without a Pi invocation running. The sandbox stays alive and billed;
@@ -109,9 +109,11 @@ Use a small repository you control with deterministic tests and a bounded issue:
 pnpm cli start https://github.com/<team>/<demo-repo>.git "Fix the parser edge case, consult your reviewer and report the pushed commit and test evidence."
 ```
 
-The returned response contains `run._id` and agent IDs. The CLI seeds an
-implementer/reviewer pair; the API accepts other roles and up to eight agents.
-Both agents receive the objective, discover peers and can message them directly.
+The returned response contains `run._id` and agent IDs. The CLI starts one orchestrator with a default two-worker limit. It dynamically
+chooses peer roles and instructions, with up to eight workers excluding itself.
+Use `pnpm cli start - "objective" 0` for a personal objective without Git or workers.
+All agents share the Pi runtime and can communicate directly. Task completion is
+owner-controlled unless a reviewer was explicitly requested.
 
 ```bash
 pnpm cli status <run-id>
@@ -179,9 +181,11 @@ compaction accounting remain future work. Task evidence is agent-reported; a
 trusted evaluator has not been implemented. A `done` flag does not establish
 verified success.
 
-The planning orchestrator's spawn/completion tools,
-automated sandbox replacement, semantic knowledge discovery and reuse across
-completed runs remain later slices of [Milestone 1](milestone-1.md). This runtime
+Dynamic orchestrator spawning, generic owner task completion, optional review,
+durable self-wakeups and completion after the final checkpoint are now implemented.
+See [orchestration contracts](orchestration.md) for the changed start API.
+Automated sandbox replacement, semantic knowledge discovery and reuse across
+completed runs remain future work. This runtime
 does not complete the entire milestone. The verified E2E stores coordination
 state and checkpoints in the provided Atlas cluster; it does not host guest
 compute inside Atlas.
@@ -201,7 +205,9 @@ Requires `MONGODB_URI`/`MONGODB_DATABASE` in `.env`, Modal authentication and
 `ATOI_MODEL_API_KEY` or `MODAL_MODEL_SECRET`. With OpenAI, the check can use an
 existing local `OPENAI_API_KEY`; the default pinned-catalog model is `gpt-4.1`.
 The script starts a real local Temporal service, authenticated API and temporary
-Cloudflare HTTPS tunnel, then two real Modal/Pi workers with real inference.
+Cloudflare HTTPS tunnel, then one real Modal/Pi orchestrator that dynamically spawns two real workers with
+real inference. The fixture asks for a read-only exact-commit review and a
+checkpointed worker follow-up before the orchestrator calls `finish_run`.
 It verifies a read-only task against an existing public Git commit, requires an
 independent reviewer, confirms peer DMs and wakeup, then checks the implementer's
 native session and retained private file on a follow-up turn. It does not prove a
@@ -240,5 +246,7 @@ Ryan's coordination slice also need the new lifecycle/event fields before resumi
 historical runs; use fresh runs for this demo. Cleanup confirmation and in-flight
 provisioning markers are new fields; historical stopped records do not establish
 these new guarantees. The admin registration endpoint accepts only logical
-agents (`runtimeEnabled` omitted or false). Runtime agents are seeded through
-`/operator/runs`, which generates the same scoped credentials used by the guest.
+agents (`runtimeEnabled` omitted or false). `/operator/runs` now starts only the orchestrator; its authenticated spawn requests
+reserve worker identities and capacity and enqueue provisioning durably. All generated
+credentials match the trusted runner. Existing seeded-agent start requests must migrate
+to `workerLimit`; see [migration](orchestration.md#development-migration).

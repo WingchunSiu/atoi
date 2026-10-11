@@ -78,6 +78,7 @@ export const AGENT_STATE_COLOR: Record<AgentState, string> = {
 export const RUN_STATUS_COLOR: Record<RunStatus, string> = {
   starting: "var(--color-amber)",
   running: "var(--color-accent)",
+  stopping: "var(--color-amber)",
   completing: "var(--color-accent)",
   completed: "var(--color-ink)",
   failed: "var(--color-red)",

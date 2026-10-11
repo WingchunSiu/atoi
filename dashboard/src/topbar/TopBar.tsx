@@ -71,7 +71,7 @@ function RunPicker() {
       >
         {runs.map((r) => (
           <option key={r.id} value={r.id}>
-            {r.id}
+            {r.id.slice(0, 10)}
             {r.status ? ` · ${r.status}` : ""}
             {r.mock && kind === "live" ? " · mock" : ""}
           </option>
@@ -82,6 +82,9 @@ function RunPicker() {
 }
 
 export function TopBar() {
+  const { source } = useRun();
+  const [stopping, setStopping] = useState(false);
+  const [stopError, setStopError] = useState("");
   const state = useRunState();
   const now = useNow(1000);
   const c = selectCounters(state, now);
@@ -106,11 +109,44 @@ export function TopBar() {
         <Counter value={String(c.messages)} label="messages" />
         <Counter value={`${c.tasksDone}/${c.tasks}`} label="tasks done" />
         <Counter value={tokens(c.tokens)} label="tokens" />
-        <Counter value={usd(c.costUsd)} label="cost" />
+        <Counter value={usd(c.costUsd)} label="model cost" />
         <Counter value={c.elapsedMs === undefined ? "–" : duration(c.elapsedMs)} label="elapsed" />
         <DroppedEvents />
         <SourceLabel />
         <RunPicker />
+        {source.kind === "live" && (
+          <>
+            <a
+              href="?source=live&new=1"
+              className="rounded-box border border-line px-2 py-1 text-chip"
+            >
+              New chat
+            </a>
+            <button
+              type="button"
+              disabled={
+                stopping ||
+                !state.run ||
+                ["completed", "cancelled", "failed", "stopping"].includes(state.run.status)
+              }
+              onClick={() => {
+                setStopping(true);
+                void source
+                  .stop?.()
+                  .catch((error) => setStopError(String(error)))
+                  .finally(() => setStopping(false));
+              }}
+              className="rounded-box border border-red px-2 py-1 text-chip text-red disabled:opacity-40"
+            >
+              Stop run
+            </button>
+            {stopError && (
+              <span role="alert" className="text-chip text-red">
+                {stopError}
+              </span>
+            )}
+          </>
+        )}
       </div>
     </header>
   );
@@ -168,7 +204,8 @@ export function ConnectionStrip() {
         <span>
           {s.state === "reconnecting"
             ? "Lost connection to the backend. Reconnecting…"
-            : `Lost connection to the backend. Retrying in ${left}s.`}
+            : (s.message ?? "Could not load live activity.")}
+          {s.state === "error" && left !== undefined ? ` Retrying in ${left}s.` : ""}
         </span>
         <button
           type="button"

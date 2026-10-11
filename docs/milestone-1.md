@@ -4,6 +4,12 @@ Build a working vertical slice of the harness: an orchestrator spawns a configur
 
 ## Scope
 
+The code implementation/review fixture below is an acceptance scenario, not a
+mandatory structure for every run. The runtime also supports personal, research
+and planning objectives without a Git repository. Workers can finish their own
+tasks; dependencies and peer review are opt-in. An orchestrator may handle a
+small objective alone. See [orchestration contracts](orchestration.md).
+
 The web app starts a team run with an objective, repository and configurable worker limit. The backend durably accepts the request and returns a run ID; Temporal provisions the orchestrator asynchronously. The orchestrator assigns initial roles, spawns workers, seeds tasks, monitors progress and assesses completion. All agents can create and claim tasks, post to the team channel, and DM each other. Roles guide behavior without restricting peer communication. The CLI uses the same API for debugging and smoke checks.
 
 The initial fixture uses an implementer and reviewer against a small repository with deterministic tests and a bounded change, such as fixing a parser edge case. These are fixture roles, not hard-coded worker slots. The orchestrator can add workers during a run within its configured limit. Worker-initiated spawning is deferred.

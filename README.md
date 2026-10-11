@@ -12,6 +12,8 @@ The technical idea is to organize inference compute across several retained,
 focused contexts. Agents investigate different parts of a problem, do real work
 in their own sandboxes, and exchange the information they need through direct
 messages. Persistence lets those conversations continue after the first answer.
+Files retain detailed notes, code and reproducible experiments outside the model
+window; peers can inspect versioned artifacts behind a message and ask follow-ups.
 See the [product story and inference-scaling thesis](docs/product-story.md).
 
 Code is the first proving ground for this broader product vision. Pi runs the
@@ -26,14 +28,14 @@ reusing the same team across completed runs remains future work.
 The unified TypeScript harness provides:
 
 - Scoped bearer authentication and operator bootstrap APIs.
-- Agent registration with atomic worker-capacity limits.
-- Task creation, atomic claims, dependencies and versioned review transitions.
+- One Pi orchestrator that dynamically creates peers with atomic worker-capacity limits.
+- Task creation, atomic claims and owner completion, with optional dependencies and peer review.
 - Team channels and private DMs with ordered, paginated history.
 - Atomic message, delivery and outbox writes with request deduplication.
 - A read-only pending inbox and structured audit records.
 
 - Pi coding tools in private Modal workspaces, with bounded model/tool turns.
-- Temporal scheduling, durable outbox reconciliation, per-agent serialization and cleanup.
+- Temporal scheduling, durable self-wakeups, outbox reconciliation, per-agent serialization and cleanup.
 - Native Pi session checkpoints published atomically with inbox acknowledgement.
 - Invocation fencing, confirmed-result reuse and explicit inspection of ambiguous failures.
 - Authenticated activity history and SSE APIs, with CLI replay and observation.
@@ -41,8 +43,13 @@ The unified TypeScript harness provides:
 The runtime retains each sandbox between turns; idle guests remain alive and billed.
 VM pause/resume and automated sandbox replacement are not implemented. The API's
 bootstrap registration still creates logical agents only; `/operator/runs` starts
-runtime-enabled agents. Task approval requires an independent reviewer of the exact
-commit, but evidence remains agent-reported rather than trusted evaluator output.
+one runtime-enabled orchestrator, which chooses worker roles and instructions through
+`spawn_agent`. Workers can finish their own tasks and remain available for follow-up.
+Requested peer reviews require a different reviewer; code reviews reference the exact
+commit. Evidence remains agent-reported rather than trusted evaluator output.
+Research and personal-assistant runs need no repository, Git commit or mandatory reviewer.
+`finish_run` records the overall outcome and waits for the orchestrator's final checkpoint
+before cleaning up all compute.
 
 Local tests cover the integrated harness with scripted inference and sandbox fixtures.
 Real Atlas + Modal + Pi + live-model E2E passed, including independent review,
@@ -92,6 +99,21 @@ needed. Modal workers require an HTTPS `BACKEND_PUBLIC_URL` reaching this API;
 configure Modal authentication and a model secret before launching real agents.
 The liveness endpoint is `/health`. See [runtime setup](docs/runtime.md) for the
 complete setup, CLI run/message/stop sequence and real E2E command.
+
+## Start an orchestrated run
+
+```sh
+pnpm cli start https://github.com/<team>/<repo>.git "Implement and independently review a bounded fix" 2
+pnpm cli start - "Research this question and return a sourced comparison" 2
+pnpm cli start - "Help me plan my week" 0
+```
+
+The final argument is the worker limit, excluding the orchestrator (default 2,
+range 0–8). Use `-` when no Git repository is needed. Roles are chosen at runtime;
+there is no fixed implementer/reviewer pair. `finish_task` ends an individual task,
+while the agent remains available within the run. `finish_run` ends the run and stops
+all sandboxes; reuse across completed runs is still deferred. See [orchestration
+contracts and migration](docs/orchestration.md).
 
 ## Coordination demo
 
@@ -156,13 +178,26 @@ Build output goes to `dist/`. Run the compiled service with `pnpm start`.
 
 ## Dashboard
 
-A browser dashboard for watching a run and messaging the orchestrator lives in
-[`dashboard/`](dashboard/README.md). It runs on scripted mock data and a local fake event
-stream; it is not connected to the coordination service yet.
+The [dashboard](dashboard/README.md) starts with a chat message: sending the first
+message durably creates a run and wakes its orchestrator. Optional conversation
+settings control the repository, worker cap and deadline. Continue in the same chat,
+message peers, inspect recorded activity and stop compute from the browser.
+
+For a local live demo with real Atlas, Modal, Pi and a persistent local Temporal service:
 
 ```sh
-pnpm --filter atoi-dashboard dev
+pnpm build
+CLOUDFLARED_PATH=/path/to/cloudflared pnpm demo:web
 ```
+
+Open `http://127.0.0.1:5173/`, send a short planning request, then ask a follow-up.
+The runner reads `.env`, creates private local operator credentials, and uses
+`browser_*` collections within the configured Atlas database. It never resets them.
+Closing the browser leaves work running; Stop, the deadline, or Ctrl-C ends compute.
+Idle sandboxes remain billed. The Vite operator gateway binds to loopback and injects
+its server-side token; it is a local demo, not a hosted browser authentication solution.
+With separately running API/worker services, set `ADMIN_TOKEN` and `VITE_API_TARGET`
+and run `pnpm --filter atoi-dashboard dev`. Offline fixtures remain at `?source=mock`.
 
 ## Design and contributing
 

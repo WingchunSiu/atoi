@@ -11,6 +11,7 @@ import type { Activities } from "./activities.js";
 
 export const wake = defineSignal("wake");
 export const stop = defineSignal("stop");
+export const finish = defineSignal("finish");
 const activities = proxyActivities<Activities>({
   startToCloseTimeout: "15 minutes",
   heartbeatTimeout: "30 seconds",
@@ -42,7 +43,8 @@ export async function agentWorkflow(agentId: string, pendingWake = true): Promis
   });
   while (!stopping) {
     // A durable timer also reconciles missed notifications against the Atlas inbox.
-    await condition(() => awake || stopping, "1 minute");
+    const nextWakeupMs = awake ? 0 : await lifecycle.nextWakeup(agentId);
+    await condition(() => awake || stopping, Math.min(60000, nextWakeupMs));
     if (stopping) break;
     awake = false;
     try {
@@ -67,10 +69,25 @@ export async function agentWorkflow(agentId: string, pendingWake = true): Promis
 
 export async function runSupervisor(runId: string, deadlineMs: number): Promise<void> {
   let stopping = false;
+  let changed = false;
+  let iterations = 0;
   setHandler(stop, () => {
     stopping = true;
   });
-  await condition(() => stopping, Math.max(0, deadlineMs - Date.now()));
+  setHandler(finish, () => {
+    changed = true;
+  });
+  while (!stopping && Date.now() < deadlineMs) {
+    changed = false;
+    const state = await lifecycle.superviseRun(runId);
+    if (state.finished) return;
+    await condition(
+      () => stopping || changed,
+      Math.max(1, Math.min(state.nextCheckMs, deadlineMs - Date.now())),
+    );
+    if (++iterations >= 100 && !stopping)
+      await continueAsNew<typeof runSupervisor>(runId, deadlineMs);
+  }
   await lifecycle.expireRun(runId);
 }
 

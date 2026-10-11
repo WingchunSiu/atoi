@@ -1,7 +1,15 @@
-import type { SendMessageRequest, SendMessageResponse } from "../contract/events";
-import { ingest, type RunSource, type SendResult, type SourceSink } from "./types";
-
-const RETRY_MS = 4000;
+import type { SendMessageRequest } from "../contract/events";
+import { parseEvent } from "../contract/events";
+import { type RunState, reduce } from "../state/reduce";
+import {
+  activitySchema,
+  type BackendSnapshot,
+  emptyBackendState,
+  overlaySnapshot,
+  projectActivity,
+  snapshotSchema,
+} from "./backend";
+import type { RunSource, SendResult, SourceSink } from "./types";
 
 export interface RunSummary {
   id: string;
@@ -10,128 +18,177 @@ export interface RunSummary {
   startedAt?: string;
   mock?: boolean;
 }
-
-export async function fetchRuns(signal?: AbortSignal): Promise<RunSummary[]> {
-  const res = await fetch("/api/runs", { signal, headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`GET /api/runs returned ${res.status}`);
-  const type = res.headers.get("content-type") ?? "";
-  if (!type.includes("json"))
-    throw new Error(
-      "GET /api/runs did not return JSON. Is the backend (or npm run fake-sse) running?",
-    );
-  const body = (await res.json()) as { runs?: RunSummary[] };
-  return Array.isArray(body.runs) ? body.runs : [];
+export async function requestApi(path: string, options: RequestInit = {}) {
+  const response = await fetch(`/api${path}`, {
+    ...options,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      "x-atoi-browser": "1",
+      ...options.headers,
+    },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => ({}));
+    throw new Error(body.message ?? `Backend returned ${response.status}`);
+  }
+  return response.json();
 }
-
-/**
- * Opens an EventSource on /api/runs/:runId/events. The browser reconnects on its own and sends
- * Last-Event-ID; if the stream fails for good, we retry with ?after=<lastSeq>.
- */
+export async function fetchRuns(signal?: AbortSignal): Promise<RunSummary[]> {
+  const rows: Array<{
+    _id: string;
+    objective: string;
+    status: string;
+    createdAt: string;
+    archivedAt?: string;
+  }> = await requestApi("/runs", { signal });
+  if (!Array.isArray(rows)) throw new Error("Backend did not return a run list");
+  return rows
+    .filter((r) => !r.archivedAt)
+    .map((r) => ({
+      id: r._id,
+      objective: r.objective,
+      status: r.status,
+      startedAt: r.createdAt,
+    }));
+}
 export class LiveSource implements RunSource {
   readonly kind = "live" as const;
-  private es: EventSource | undefined;
-  private sink: SourceSink | undefined;
-  private lastSeq = 0;
-  private retryTimer: ReturnType<typeof setTimeout> | undefined;
-  private stopped = false;
-
+  private es?: EventSource;
+  private sink?: SourceSink;
+  private snapshot?: BackendSnapshot;
+  private state: RunState;
+  private cursor = 0;
+  private refreshTimer?: ReturnType<typeof setInterval>;
+  private abort?: AbortController;
+  private tail = Promise.resolve();
+  private refreshing = false;
   constructor(
     readonly runId: string,
-    readonly mock: boolean,
-  ) {}
-
+    readonly mock = false,
+  ) {
+    this.state = emptyBackendState(runId);
+  }
   async send(req: SendMessageRequest): Promise<SendResult> {
-    let res: Response;
     try {
-      res = await fetch(`/api/runs/${encodeURIComponent(this.runId)}/messages`, {
+      if (!req.to && !this.snapshot) await this.refresh();
+      const planner = this.snapshot?.agents.find((a) => a.kind === "orchestrator")?._id;
+      if (!req.to && !planner)
+        throw new Error("The orchestrator is not available yet. Please retry.");
+      const message = await requestApi(`/runs/${this.runId}/messages`, {
         method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(req),
+        signal: AbortSignal.timeout(15000),
+        body: JSON.stringify({
+          requestId: req.clientRequestId,
+          body: req.body,
+          recipientId: req.to || undefined,
+          // Human team messages address the planner; peer broadcasts remain opt-in.
+          mentions: req.to ? [] : [planner],
+        }),
       });
-    } catch (err) {
-      return { ok: false, error: `Couldn't reach the backend (${String(err)}).` };
+      return { ok: true, messageId: message._id };
+    } catch (error) {
+      return { ok: false, error: String(error) };
     }
-    if (!res.ok) {
-      const detail = await res
-        .json()
-        .then((b: { error?: string }) => b.error)
-        .catch(() => undefined);
-      const hint =
-        res.status === 404 || res.status === 405 ? " The backend may not accept messages yet." : "";
-      return {
-        ok: false,
-        status: res.status,
-        error: `${detail ?? `The backend returned ${res.status}.`}${hint}`,
-      };
-    }
-    const body = (await res.json().catch(() => ({}))) as Partial<SendMessageResponse>;
-    return { ok: true, messageId: body.messageId ?? "" };
   }
-
-  start(sink: SourceSink): () => void {
+  async stop() {
+    await requestApi(`/runs/${this.runId}/stop`, { method: "POST", body: "{}" });
+    await this.refresh();
+  }
+  start(sink: SourceSink) {
     this.sink = sink;
-    this.stopped = false;
-    this.open();
+    this.abort = new AbortController();
+    void this.open().catch((error) => sink.status({ state: "error", message: String(error) }));
     return () => {
-      this.stopped = true;
-      clearTimeout(this.retryTimer);
+      this.abort?.abort();
       this.es?.close();
+      clearInterval(this.refreshTimer);
     };
   }
-
   retry() {
-    clearTimeout(this.retryTimer);
     this.es?.close();
-    this.open();
+    void this.open().catch((error) =>
+      this.sink?.status({ state: "error", message: String(error) }),
+    );
   }
-
-  private open() {
-    const sink = this.sink!;
-    sink.status({ state: this.lastSeq ? "reconnecting" : "connecting" });
-    const after = this.lastSeq ? `?after=${this.lastSeq}` : "";
-    const es = new EventSource(`/api/runs/${encodeURIComponent(this.runId)}/events${after}`);
-    this.es = es;
-    es.onopen = () => sink.status({ state: "open" });
-    es.onmessage = (msg) => {
-      const seq = ingest(msg.data, sink);
-      if (seq !== undefined && seq > this.lastSeq) this.lastSeq = seq;
-    };
-    es.onerror = () => {
-      if (this.stopped) return;
-      if (es.readyState === EventSource.CONNECTING) {
-        sink.status({
-          state: "reconnecting",
-          message: "Lost connection to the backend. Reconnecting…",
-        });
-        return;
-      }
-      // Closed for good (for example a 404 or 500 on connect). Find out why, then retry.
-      es.close();
-      void this.diagnose();
-    };
-  }
-
-  private async diagnose() {
-    const sink = this.sink!;
+  private async refresh() {
+    if (this.refreshing || this.abort?.signal.aborted) return;
+    this.refreshing = true;
     try {
-      const runs = await fetchRuns();
-      if (!runs.some((r) => r.id === this.runId)) {
-        sink.status({
-          state: "error",
-          notFound: true,
-          message: `Run ${this.runId} isn't on the backend. Pick another run.`,
-        });
-        return;
+      this.snapshot = snapshotSchema.parse(
+        await requestApi(`/runs/${this.runId}`, { signal: this.abort?.signal }),
+      );
+      if (this.cursor >= (this.snapshot.run.eventSequence ?? 0)) {
+        this.state = overlaySnapshot(this.state, this.snapshot);
+        this.sink?.snapshot?.(this.state);
       }
-    } catch {
-      // Backend unreachable; fall through to the retry countdown.
+    } finally {
+      this.refreshing = false;
     }
-    if (this.stopped) return;
-    sink.status({
-      state: "error",
-      retryInMs: RETRY_MS,
-      message: "Lost connection to the backend.",
+  }
+  private async open() {
+    this.sink!.status({ state: this.cursor ? "reconnecting" : "connecting" });
+    await this.refresh();
+    if (this.abort?.signal.aborted) return;
+    clearInterval(this.refreshTimer);
+    this.refreshTimer = setInterval(
+      () =>
+        void this.refresh().catch((error) =>
+          this.sink?.status({ state: "reconnecting", message: String(error) }),
+        ),
+      2000,
+    );
+    const es = new EventSource(`/api/runs/${this.runId}/events/stream?after=${this.cursor}`);
+    this.es = es;
+    es.onopen = () => this.sink?.status({ state: "open" });
+    es.addEventListener("activity", (raw) => {
+      this.tail = this.tail
+        .then(async () => {
+          if (this.abort?.signal.aborted) return;
+          const event = activitySchema.parse(JSON.parse((raw as MessageEvent).data));
+          if (event.runId !== this.runId) throw new Error("Activity belongs to another run");
+          if (event.sequence <= this.cursor) return;
+          // Entity references may not be in the initial snapshot when a peer just joined.
+          if (
+            [
+              "task.created",
+              "task.claimed",
+              "task.updated",
+              "agent.spawned",
+              "message.sent",
+            ].includes(event.type)
+          )
+            await this.refresh();
+          let message = this.snapshot!.messages.find((m) => m._id === event.entityId);
+          if (event.type === "message.sent" && !message)
+            message = await requestApi(`/runs/${this.runId}/messages/${event.entityId}`);
+          for (const projected of projectActivity(event, this.snapshot!, message)) {
+            const parsed = parseEvent(projected);
+            if (!parsed.ok) throw new Error(parsed.error);
+            this.state = reduce(this.state, parsed.event);
+            this.sink!.event(parsed.event);
+          }
+          this.cursor = event.sequence;
+          if (this.cursor >= (this.snapshot!.run.eventSequence ?? 0)) {
+            this.state = overlaySnapshot(this.state, this.snapshot!);
+            this.sink?.snapshot?.(this.state);
+          }
+        })
+        .catch((error) => {
+          this.sink?.malformed(String(error), undefined);
+          this.sink?.status({ state: "error", message: String(error) });
+          es.close();
+        });
     });
-    this.retryTimer = setTimeout(() => this.open(), RETRY_MS);
+    es.addEventListener("stream_error", () =>
+      this.sink?.status({ state: "reconnecting", message: "Backend activity source unavailable" }),
+    );
+    es.onerror = () => {
+      if (!this.abort?.signal.aborted)
+        this.sink?.status({
+          state: "reconnecting",
+          message: "Replaying persisted activity after reconnect",
+        });
+    };
   }
 }

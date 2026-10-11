@@ -1,5 +1,6 @@
 import type { DashboardEvent, SendMessageRequest } from "../contract/events";
 import { parseEvent } from "../contract/events";
+import type { RunState } from "../state/reduce";
 
 export type SourceKind = "live" | "mock";
 
@@ -16,6 +17,7 @@ export interface SourceStatus {
 }
 
 export interface SourceSink {
+  snapshot?(state: RunState): void;
   event(e: DashboardEvent): void;
   status(s: SourceStatus): void;
   /** A line that wasn't valid JSON or failed validation. */
@@ -32,6 +34,7 @@ export interface RunSource {
   retry?(): void;
   /** Send the operator's message (POST /api/runs/:runId/messages). */
   send(req: SendMessageRequest): Promise<SendResult>;
+  stop?(): Promise<void>;
 }
 
 /** Parse one JSON text (an NDJSON line or an SSE data field) into the sink. Returns the seq if valid. */

@@ -32,15 +32,16 @@ export class CoordinationStore {
   constructor(
     readonly client: MongoClient,
     readonly db: Db,
+    protected readonly collectionPrefix = "",
   ) {
-    this.runs = db.collection<Run>("runs");
-    this.agents = db.collection<Agent>("agents");
-    this.tasks = db.collection<Task>("tasks");
-    this.channels = db.collection<Channel>("channels");
-    this.messages = db.collection<Message>("messages");
-    this.deliveries = db.collection<Delivery>("deliveries");
-    this.outbox = db.collection<OutboxEvent>("outbox");
-    this.events = db.collection<AgentEvent>("agent_events");
+    this.runs = db.collection<Run>(`${collectionPrefix}runs`);
+    this.agents = db.collection<Agent>(`${collectionPrefix}agents`);
+    this.tasks = db.collection<Task>(`${collectionPrefix}tasks`);
+    this.channels = db.collection<Channel>(`${collectionPrefix}channels`);
+    this.messages = db.collection<Message>(`${collectionPrefix}messages`);
+    this.deliveries = db.collection<Delivery>(`${collectionPrefix}deliveries`);
+    this.outbox = db.collection<OutboxEvent>(`${collectionPrefix}outbox`);
+    this.events = db.collection<AgentEvent>(`${collectionPrefix}agent_events`);
   }
   async initialize() {
     // Pre-create collections/indexes; no DDL during business transactions.
@@ -135,7 +136,16 @@ export class CoordinationStore {
         invocationId: invocation.id,
         generation: invocation.generation,
       };
-      await this.authorizeActor(actor);
+      // Only the accepted final invocation may keep uploading activity while
+      // completing. Individual mutation methods still require an active run.
+      const run = await this.runs.findOne({ _id: runId });
+      const finishing =
+        run?.status === "completing" &&
+        run.orchestratorId === agent._id &&
+        run.completion?.invocationId === invocation.id &&
+        run.completion.generation === invocation.generation &&
+        run.deadline > new Date();
+      if (!finishing) await this.authorizeActor(actor);
       return actor;
     }
     return { agentId: agent._id, runId };
@@ -371,7 +381,13 @@ export class CoordinationStore {
         if (actor.agentId !== task.reviewerId)
           throw forbidden("Only the assigned reviewer can resolve review");
         if (input.status === "done") {
-          if (!input.review || input.review.commit !== task.result?.commit)
+          if (!input.review)
+            throw new Problem(
+              400,
+              "invalid_review",
+              "Reviewer must supply review.verification, not result. A commit is only needed when the submitted result has one.",
+            );
+          if (input.review.commit !== task.result?.commit)
             throw new Problem(
               400,
               "invalid_review",
@@ -406,13 +422,24 @@ export class CoordinationStore {
           next.result = input.result;
           next.reviewerId = input.reviewerId;
           delete next.reason;
+        } else if (task.status === "in_progress" && input.status === "done" && input.result) {
+          if (input.reviewerId)
+            throw new Problem(400, "invalid_update", "Submit in_review when requesting a reviewer");
+          next.result = input.result;
+          next.reviewerId = null;
+          delete next.review;
+          delete next.reason;
         } else if (task.status === "in_progress" && input.status === "blocked" && input.reason) {
           next.reason = input.reason;
         } else if (task.status === "blocked" && input.status === "in_progress") {
           delete next.reason;
         } else throw conflict("Invalid task transition");
-        if (input.status !== "in_review" && (input.result || input.reviewerId))
-          throw new Problem(400, "invalid_update", "Result fields require submission for review");
+        if (!["in_review", "done"].includes(input.status) && (input.result || input.reviewerId))
+          throw new Problem(
+            400,
+            "invalid_update",
+            "Result fields require task completion or submission for review",
+          );
       }
       next.status = input.status;
       const replaced = await this.tasks.replaceOne(
@@ -451,10 +478,11 @@ export class CoordinationStore {
     const id = stableId(actor.runId, "dm", ...participants);
     return this.transaction(async (session) => {
       await this.authorizeActor(actor, session);
-      requireValue(
-        await this.agents.findOne({ _id: peerId, runId: actor.runId }, { session }),
-        "Peer not found in this run",
-      );
+      if (peerId !== "operator")
+        requireValue(
+          await this.agents.findOne({ _id: peerId, runId: actor.runId }, { session }),
+          "Peer not found in this run",
+        );
       const existing = await this.channels.findOne({ _id: id }, { session });
       if (existing) return existing;
       const channel: Channel = {
@@ -514,7 +542,7 @@ export class CoordinationStore {
       )
         throw new Problem(400, "invalid_mentions", "Mentions must be members of this channel");
       const recipients = (channel.kind === "dm" ? channel.participants : mentions).filter(
-        (id) => id !== actor.agentId,
+        (id) => id !== actor.agentId && id !== "operator",
       );
       const counter = requireValue(
         await this.channels.findOneAndUpdate(

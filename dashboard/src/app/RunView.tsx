@@ -3,6 +3,7 @@ import { ActivityEngine, prefersReducedMotion } from "../canvas/activity";
 import { MeshCanvas } from "../canvas/MeshCanvas";
 import { ThemeDefs } from "../canvas/ScenicBackdrop";
 import { ChatPanel } from "../chat/ChatPanel";
+import { USER_ID } from "../contract/events";
 import { DRAWER_WIDTH, Drawer, DrawerToggle } from "../inspector/Drawer";
 import type { RunSummary } from "../sources/live";
 import type { RunSource, SourceStatus } from "../sources/types";
@@ -55,7 +56,20 @@ export function RunView({ source, runs }: { source: RunSource; runs: RunSummary[
     // Dev-only handle for QA scripts.
     if (import.meta.env.DEV) (window as unknown as { __atoi: RunContextValue }).__atoi = ctx;
     const offAdvance = store.onAdvance((fresh, state) => activity.handle(fresh, state));
+    let openedChat = false;
     const stop = source.start({
+      snapshot: (state) => {
+        store.hydrate(state);
+        if (source.kind === "live" && !openedChat) {
+          const orchestrator = state.agentOrder.find(
+            (id) => state.agents[id]?.kind === "orchestrator",
+          );
+          if (orchestrator) {
+            actions.openChat([USER_ID, orchestrator].sort().join("|"));
+            openedChat = true;
+          }
+        }
+      },
       event: (e) => store.append(e),
       malformed: () => store.markSkipped(),
       status: (s) => status.set({ status: s, since: Date.now() }),

@@ -2,10 +2,13 @@ import { z } from "zod";
 import { buildApp } from "../app.js";
 import {
   eventInput,
+  finishInput,
   HarnessError,
   id,
   runInput,
   sendInput,
+  spawnInput,
+  wakeupInput,
   workLogInput,
 } from "../contracts/runtime.js";
 import type { MongoStore } from "../store/mongo.js";
@@ -30,6 +33,7 @@ export function createServer(
       run: await store.getRun(runId),
       agents,
       tasks: await store.tasks.find({ runId }).limit(100).toArray(),
+      channels: await store.channels.find({ runId }).limit(100).toArray(),
       messages: await store.messages.find({ runId }).sort({ createdAt: -1 }).limit(100).toArray(),
       events: await store.events.find({ runId }).sort({ createdAt: -1 }).limit(100).toArray(),
       invocations: await store.invocations
@@ -40,6 +44,12 @@ export function createServer(
       pendingOutbox: await store.outbox.find({ runId, status: "pending" }).limit(100).toArray(),
     };
   });
+  app.get("/operator/runs/:runId/messages/:messageId", async (request) => {
+    const { runId, messageId } = z.object({ runId: id, messageId: id }).parse(request.params);
+    const message = await store.messages.findOne({ runId, _id: messageId });
+    if (!message) throw new HarnessError(404, "Message not found in this run");
+    return message;
+  });
   app.post("/operator/runs/:runId/messages", async (request) => {
     const { runId } = z.object({ runId: id }).parse(request.params);
     return store.send(runId, "operator", sendInput.parse(request.body));
@@ -47,7 +57,23 @@ export function createServer(
   app.post("/operator/runs/:runId/stop", async (request) => {
     const { runId } = z.object({ runId: id }).parse(request.params);
     await store.stopRun(runId);
-    return { status: "stopping", runId };
+    return { status: (await store.getRun(runId)).status, runId };
+  });
+  app.get("/runs/:runId", async (request) => {
+    if (!request.actor) throw new HarnessError(401, "Agent authentication required");
+    return store.getRun(request.actor.runId);
+  });
+  app.post("/runs/:runId/agents", async (request) => {
+    if (!request.actor) throw new HarnessError(401, "Agent authentication required");
+    return store.spawnAgent(request.actor, spawnInput.parse(request.body));
+  });
+  app.post("/runs/:runId/finish", async (request) => {
+    if (!request.actor) throw new HarnessError(401, "Agent authentication required");
+    return store.requestFinish(request.actor, finishInput.parse(request.body));
+  });
+  app.post("/runs/:runId/wakeups", async (request) => {
+    if (!request.actor) throw new HarnessError(401, "Agent authentication required");
+    return store.scheduleWakeup(request.actor, wakeupInput.parse(request.body));
   });
   app.post("/runs/:runId/events", { bodyLimit: 132 * 1024 }, async (request) => {
     if (!request.actor) throw new HarnessError(401, "Agent authentication required");

@@ -7,6 +7,7 @@ import { agentToken } from "../src/api/auth.js";
 import { createServer } from "../src/api/server.js";
 import { runInput, type WorkerResult } from "../src/contracts/runtime.js";
 import { type Agent, MongoStore } from "../src/store/mongo.js";
+import { fixtureTeam } from "./runtime-fixture.js";
 
 let server: MongoMemoryReplSet;
 let client: MongoClient;
@@ -27,17 +28,10 @@ afterAll(async () => {
 });
 
 async function team() {
-  return store.createRun(
-    runInput.parse({
-      requestId: randomUUID(),
-      objective: "Fix and verify a parser bug",
-      repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      agents: [
-        { role: "implementer", instructions: "Implement" },
-        { role: "reviewer", instructions: "Review" },
-      ],
-    }),
-  );
+  return fixtureTeam(store, [
+    { role: "implementer", instructions: "Implement" },
+    { role: "reviewer", instructions: "Review" },
+  ]);
 }
 const result = (invocationId: string, generation: number): WorkerResult => {
   const checkpoint =
@@ -61,12 +55,23 @@ const result = (invocationId: string, generation: number): WorkerResult => {
 };
 
 describe("real MongoDB replica-set persistence", () => {
+  it("finalizes once when all agents confirm cleanup concurrently and retry acknowledgements", async () => {
+    const { run } = await team();
+    const agents = await store.agents.find({ runId: run._id }).toArray();
+    await store.stopRun(run._id);
+    await Promise.all(agents.map((agent) => store.confirmCleanup(agent._id)));
+    expect((await store.getRun(run._id)).status).toBe("stopped");
+    expect(await store.agents.countDocuments({ runId: run._id, cleanupCompletedAt: null })).toBe(0);
+    await Promise.all(agents.map((agent) => store.confirmCleanup(agent._id)));
+    expect(await store.events.countDocuments({ runId: run._id, kind: "run.finished" })).toBe(1);
+  });
+
   it("deduplicates starts and concurrent message delivery transactionally", async () => {
     const input = runInput.parse({
       requestId: randomUUID(),
       objective: "Test",
       repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      agents: [{ role: "peer", instructions: "Consult peers" }],
+      workerLimit: 1,
     });
     const starts = await Promise.all([store.createRun(input), store.createRun(input)]);
     expect(starts[0].run._id).toBe(starts[1].run._id);
@@ -122,7 +127,7 @@ describe("real MongoDB replica-set persistence", () => {
       }),
     ).toBe(1);
     await store.stopRun(run._id);
-    expect(await store.outbox.countDocuments({ runId: run._id, kind: "stop" })).toBe(2);
+    expect(await store.outbox.countDocuments({ runId: run._id, kind: "stop" })).toBe(3);
     await expect(
       store.complete(agents[0]!._id, result(invocation._id, invocation.generation)),
     ).rejects.toThrow("Stale");

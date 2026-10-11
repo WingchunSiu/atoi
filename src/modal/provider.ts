@@ -11,6 +11,10 @@ export interface ModalOptions {
   gitSecret?: string;
 }
 
+// Modal caps names at 64 characters. Runtime identities are 64-character hashes;
+// retain the full identity in tags while using a stable bounded provider name.
+const sandboxName = (agentId: string) => `atoi-${agentId.slice(0, 59)}`;
+
 export class ModalAgents {
   constructor(
     readonly client: ModalClient,
@@ -18,12 +22,16 @@ export class ModalAgents {
   ) {}
 
   async create(agent: Agent, run: Run): Promise<string> {
-    if (this.options.gitSecret && new URL(run.repository).hostname !== "github.com")
+    if (
+      this.options.gitSecret &&
+      run.repository &&
+      new URL(run.repository).hostname !== "github.com"
+    )
       throw new Error("The GitHub token helper accepts only github.com repositories");
     const app = await this.client.apps.fromName(this.options.appName, {
       createIfMissing: true,
     });
-    const name = `atoi-${agent._id}`;
+    const name = sandboxName(agent._id);
     let sandbox: Sandbox;
     try {
       sandbox = await this.client.sandboxes.fromName(this.options.appName, name);
@@ -44,7 +52,7 @@ export class ModalAgents {
           "RUN cd /opt/atoi && pnpm install --prod --frozen-lockfile --ignore-scripts",
         ]);
       const secrets = await Promise.all(
-        [this.options.modelSecret, this.options.gitSecret]
+        [this.options.modelSecret, run.repository ? this.options.gitSecret : undefined]
           .filter((item): item is string => Boolean(item))
           .map((secret) => this.client.secrets.fromName(secret)),
       );
@@ -85,9 +93,9 @@ export class ModalAgents {
         [
           "bash",
           "-c",
-          'set -eu; if [ ! -d /workspace/repo/.git ]; then git clone -- "$1" /workspace/repo; fi; git -C /workspace/repo config user.name "atoi agent"; git -C /workspace/repo config user.email "agent@atoi.invalid"',
+          'set -eu; if [ -n "$1" ]; then if [ ! -d /workspace/repo/.git ]; then git clone -- "$1" /workspace/repo; fi; git -C /workspace/repo config user.name "atoi agent"; git -C /workspace/repo config user.email "agent@atoi.invalid"; else mkdir -p /workspace/repo; fi',
           "atoi-init",
-          run.repository,
+          run.repository ?? "",
         ],
         { timeoutMs: 120_000 },
       );
@@ -175,7 +183,7 @@ export class ModalAgents {
   async stopNamed(agentId: string): Promise<void> {
     let sandbox: Sandbox;
     try {
-      sandbox = await this.client.sandboxes.fromName(this.options.appName, `atoi-${agentId}`);
+      sandbox = await this.client.sandboxes.fromName(this.options.appName, sandboxName(agentId));
     } catch (error) {
       if (error instanceof NotFoundError) return;
       throw error;

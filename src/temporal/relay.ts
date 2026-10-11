@@ -12,7 +12,9 @@ export async function reconcile(
 ): Promise<void> {
   // The Atlas run record itself is a durable supervisor-start request. A failed
   // API response or missed outbox wakeup cannot strand an accepted run.
-  for (const run of await store.runs.find({ status: "active" }).toArray()) {
+  for (const run of await store.runs
+    .find({ status: { $in: ["active", "completing"] } })
+    .toArray()) {
     try {
       await client.workflow.start("runSupervisor", {
         workflowId: `run/${run._id}`,
@@ -78,7 +80,30 @@ export async function reconcile(
   for (const event of await store.outbox.find({ status: "pending" }).limit(100).toArray()) {
     try {
       const run = await store.getRun(event.runId);
-      if (event.kind === "mailbox_wakeup" && run.status === "active") {
+      if (event.kind === "run_start" && ["active", "completing"].includes(run.status)) {
+        try {
+          await client.workflow.start("runSupervisor", {
+            workflowId: `run/${run._id}`,
+            taskQueue,
+            args: [run._id, run.deadline.getTime()],
+            workflowIdReusePolicy: "REJECT_DUPLICATE",
+          });
+        } catch (error) {
+          if (!(error instanceof WorkflowExecutionAlreadyStartedError)) throw error;
+        }
+      } else if (event.kind === "run_completion" && ["active", "completing"].includes(run.status)) {
+        await client.workflow.signalWithStart("runSupervisor", {
+          workflowId: `run/${run._id}`,
+          taskQueue,
+          args: [run._id, run.deadline.getTime()],
+          signal: "finish",
+          signalArgs: [],
+          workflowIdReusePolicy: "REJECT_DUPLICATE",
+        });
+      } else if (
+        ["mailbox_wakeup", "agent_start"].includes(event.kind) &&
+        run.status === "active"
+      ) {
         if ((await store.getAgent(event.recipientId)).status === "needs_inspection") continue;
         await client.workflow.signalWithStart("agentWorkflow", {
           workflowId: `agent/${event.recipientId}`,

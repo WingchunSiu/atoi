@@ -19,6 +19,9 @@ const request = (invocationId: string, checkpoint: string | null = null): Worker
   invocationId,
   generation: 1,
   role: "developer",
+  kind: "worker",
+  orchestratorId: "orchestrator-a",
+  workerLimit: 3,
   instructions: "Reuse your knowledge and consult peers.",
   prompt: "Inspect the workspace and consult the reviewer.",
   backendUrl: "https://example.invalid",
@@ -61,6 +64,9 @@ describe("Pi guest persistence with a scripted model", () => {
         expect(session.getActiveToolNames()).toEqual(
           expect.arrayContaining(["read", "bash", "edit", "write", "send_message", "list_agents"]),
         );
+        expect(session.getActiveToolNames()).not.toContain("spawn_agent");
+        expect(session.getActiveToolNames()).not.toContain("finish_run");
+        expect(session.getActiveToolNames()).toContain("finish_task");
         await scriptedPi(session, [
           [
             tool("write-call", "write", {
@@ -193,4 +199,46 @@ describe("Pi guest persistence with a scripted model", () => {
       "interrupted invocation",
     );
   });
+});
+
+it("gives the orchestrator the same Pi tools plus spawn and run completion", async () => {
+  const options = await fixture();
+  const result = await executeTurn(
+    {
+      ...request("orchestrator-capabilities"),
+      kind: "orchestrator",
+      instructions: "Handle the objective",
+    },
+    {
+      ...options,
+      async configureSession(session) {
+        expect(session.getActiveToolNames()).toEqual(
+          expect.arrayContaining([
+            "read",
+            "bash",
+            "send_message",
+            "finish_task",
+            "schedule_wakeup",
+            "spawn_agent",
+            "finish_run",
+          ]),
+        );
+        await scriptedPi(session, [
+          [
+            tool("spawn", "spawn_agent", {
+              role: "researcher",
+              instructions: "Investigate the question",
+            }),
+          ],
+          "Peer assigned.",
+        ]);
+      },
+    },
+  );
+  expect(result.outcome).toBe("completed");
+  expect(
+    options.backend.calls.some(
+      (call) => call.path === "/agents" && (call.body as { role?: string }).role === "researcher",
+    ),
+  ).toBe(true);
 });

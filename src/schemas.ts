@@ -6,7 +6,7 @@ const Strict = { additionalProperties: false };
 export const RunInput = Type.Object(
   {
     objective: Text(),
-    repository: Text(2048),
+    repository: Type.Optional(Text(2048)),
     workerLimit: Type.Integer({ minimum: 1, maximum: 1000 }),
     lifetimeSeconds: Type.Optional(Type.Integer({ minimum: 60, maximum: 82800 })),
     maxInvocationsPerAgent: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
@@ -34,7 +34,12 @@ export const TaskInput = Type.Object(
   Strict,
 );
 export const Result = Type.Object(
-  { commit: Type.String({ pattern: "^[a-f0-9]{40}$" }), summary: Text(), verification: Text() },
+  {
+    commit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })),
+    summary: Text(),
+    verification: Type.Optional(Text()),
+    evidence: Type.Optional(Type.Array(Text(2000), { maxItems: 20 })),
+  },
   Strict,
 );
 export const TaskUpdate = Type.Object(
@@ -51,7 +56,7 @@ export const TaskUpdate = Type.Object(
     result: Type.Optional(Result),
     review: Type.Optional(
       Type.Object(
-        { commit: Type.String({ pattern: "^[a-f0-9]{40}$" }), verification: Text() },
+        { commit: Type.Optional(Type.String({ pattern: "^[a-f0-9]{40}$" })), verification: Text() },
         Strict,
       ),
     ),

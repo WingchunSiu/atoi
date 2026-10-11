@@ -27,7 +27,9 @@ function TaskRow({ task, open }: { task: TaskView; open: boolean }) {
         onClick={() => ui.set({ selectedTask: open ? undefined : task.id })}
         className="flex w-full items-baseline gap-2 px-2 py-1.5 text-left hover:bg-hub"
       >
-        <span className="shrink-0 font-medium">{task.id}</span>
+        <span className="shrink-0 font-medium" title={task.id}>
+          {task.id.slice(0, 8)}
+        </span>
         <span className="min-w-0 flex-1 truncate font-sans text-body" title={task.title}>
           {task.title}
         </span>
@@ -43,6 +45,18 @@ function TaskRow({ task, open }: { task: TaskView; open: boolean }) {
       </div>
       {open && (
         <div className="space-y-2 border-t border-line/60 px-2 py-2 text-body">
+          {task.resultSummary && (
+            <div>
+              <div className="text-muted">result · agent reported</div>
+              <p className="whitespace-pre-wrap font-sans">{task.resultSummary}</p>
+            </div>
+          )}
+          {task.verification && (
+            <div>
+              <div className="text-muted">verification notes</div>
+              <p className="whitespace-pre-wrap font-sans">{task.verification}</p>
+            </div>
+          )}
           {task.description && (
             <p className="font-sans">
               <RichText text={task.description} />

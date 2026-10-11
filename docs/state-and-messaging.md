@@ -31,7 +31,8 @@ these APIs beyond localhost. Sandboxes must never receive the operator token.
 | Claim | Open and unowned; all dependencies done | Claimant owns task; in progress |
 | Block | Owner; in progress; reason provided | Blocked, owner retained |
 | Resume | Owner; blocked | In progress |
-| Submit | Owner; in progress; commit, verification notes and another agent as reviewer | In review |
+| Finish | Owner; in progress; result summary, optional evidence | Done, owner remains available |
+| Submit | Owner; in progress; result and another agent as reviewer | In review |
 | Request changes | Assigned reviewer; in review; reason provided | In progress with same owner; obsolete result cleared |
 | Approve | Assigned reviewer; in review; verification references submitted commit | Done |
 
@@ -48,7 +49,11 @@ the latest task before choosing the next update. Task changes and audit events
 commit together. Audit events retain submitted commit references, verification
 notes and rejection reasons even when the current task result is cleared.
 
-Result commits must be full 40-character SHA-1 commit IDs. Verification text is a
+Tasks are generic: a summary is required for completion, while Git commits and
+verification notes are optional. Owner completion is allowed without a reviewer;
+assigning a reviewer explicitly opts into the review path. An assigned review
+cannot be bypassed by the owner. When supplied, result commits must be full
+40-character SHA-1 commit IDs. Verification text is a
 reported claim, not trusted execution evidence. This service does not fetch Git,
 check that a commit is pushed, or run tests. Pi can run Git and tests inside each guest, but a trusted evaluator is still
 future work. Self-review is disallowed, including for orchestrators.
@@ -56,8 +61,10 @@ future work. Self-review is disallowed, including for orchestrators.
 ## Channels, messages and actionable deliveries
 
 Every run has one team channel. All agents in that run, including agents registered
-later, can read its history. A DM is a stable channel for an unordered pair of
-agents in the same run; only those two agents can discover, read or write it.
+later, can read its history. A DM is a stable channel for two participants in the run, including the human
+operator. Only participants can discover, read or write it through agent APIs.
+The reserved `operator` ID identifies authenticated human input, not an agent or
+required communication hub. Agent replies to the human persist without a Pi delivery.
 
 Messages are immutable. They contain a sender, channel, body, optional reply ID,
 explicit mentions and a server-assigned sequence within that channel. Replies must
@@ -111,7 +118,11 @@ All paths below use JSON. Agent routes are scoped under `/runs/:runId`.
 | --- | --- |
 | `PUT /admin/runs/:runId` | Bootstrap run and team channel |
 | `PUT /admin/runs/:runId/agents/:agentId` | Register logical agent and reserve capacity |
-| `GET /runs/:runId/agents` | List peers without credentials |
+| `GET /runs/:runId` | Read run objective, limits and outcome |
+| `GET /runs/:runId/agents` | List peers without exposing credentials |
+| `POST /runs/:runId/agents` | Orchestrator-only dynamic worker admission |
+| `POST /runs/:runId/finish` | Orchestrator-only completion request |
+| `POST /runs/:runId/wakeups` | Schedule a bounded self-wakeup |
 | `POST /runs/:runId/tasks` | Create a task with request ID |
 | `GET /runs/:runId/tasks` | Read task state |
 | `POST /runs/:runId/tasks/:taskId/claim` | Claim work atomically |

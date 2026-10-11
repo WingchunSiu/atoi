@@ -20,6 +20,7 @@ function activityView(event: {
     _id: event._id,
     runId: event.runId,
     agentId: event.actorId,
+    entityId: event.entityId,
     invocationId:
       typeof event.details.invocationId === "string" ? event.details.invocationId : undefined,
     type: event.kind,
@@ -44,7 +45,11 @@ export function activityRoutes(app: FastifyInstance, store: MongoStore) {
     for (const close of streams) close();
   });
   app.get("/runs", async () =>
-    store.runs.find({}).sort({ createdAt: -1, _id: -1 }).limit(30).toArray(),
+    store.runs
+      .find({ archivedAt: { $exists: false } })
+      .sort({ createdAt: -1, _id: -1 })
+      .limit(30)
+      .toArray(),
   );
 
   async function scope(runId: string, agentId?: string) {
