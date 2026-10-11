@@ -1,10 +1,15 @@
 {
   "files": {
-    "includes": ["**", "!pnpm-lock.yaml", "!dist", "!node_modules", "!.atoi", "!.cache"]
+    "includes": ["**", "!pnpm-lock.yaml", "!**/dist", "!**/node_modules", "!.atoi", "!.cache"]
   },
   "formatter": {
     "indentStyle": "space",
     "lineWidth": 100
+  },
+  "css": {
+    "parser": {
+      "tailwindDirectives": true
+    }
   },
   "linter": {
     "enabled": true,

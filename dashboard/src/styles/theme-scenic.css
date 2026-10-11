@@ -1,0 +1,86 @@
+/*
+ * Exploration: a cobalt-on-cream "engraving" theme inspired by
+ * https://www.inspora.design/posts/scenic-footer-section. Active with ?theme=scenic.
+ * Overrides the paper tokens in tokens.css; the default theme is tensorlake.
+ *
+ * Sampled from the reference: cream #e6dcd2–#f0e6d2, cobalt #1e5096, mid blues #8296be,
+ * navy text. The reference's illustration is not reused; ScenicBackdrop draws an original
+ * engraved landscape in the same spirit, and avatars become cobalt/cream duotones.
+ *
+ * Contrast on --paper / --card: ink 12.1 / 13.6, muted 5.8 / 6.5, accent 6.3 / 7.0,
+ * amber 5.0 / 5.6, red 5.8 / 6.5, green 5.1 / 5.8; --line 3.2 / 3.6 (outlines, not text).
+ */
+
+:root[data-theme="scenic"] {
+  --color-paper: #ece4d4;
+  --color-card: #f6f1e7;
+  --color-hub: #e1e6f0;
+  --color-ink: #16234a;
+  --color-muted: #4a5578;
+  --color-line: #717d9e;
+  --color-accent: #1e4f9c;
+  --color-accent-tint: #d8e0f0;
+  --color-amber: #86560e;
+  --color-amber-tint: #f1e2c3;
+  --color-red: #9a3325;
+  --color-red-tint: #f3ddd6;
+  --color-green: #2e6a3b;
+  --color-engraving: #1e4f9c;
+
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* An editorial sans for the interface; code, ids and tool calls keep the mono. */
+:root[data-theme="scenic"] body {
+  font-family: var(--font-sans);
+}
+
+/* Labels: small caps with a little tracking, the classic counterpart to uppercase mono. */
+:root[data-theme="scenic"] .atoi-label {
+  font-variant-caps: all-small-caps;
+  letter-spacing: 0.05em;
+  font-weight: 500;
+}
+
+:root[data-theme="scenic"] .atoi-headline {
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+/* Header bars sit on a double cobalt rule, like a printed page. */
+:root[data-theme="scenic"] .atoi-panel-header {
+  border-bottom: 3px double var(--color-accent) !important;
+}
+
+/* The hub gets a double-rule frame. */
+:root[data-theme="scenic"] .atoi-hub {
+  border: 4px double var(--color-accent) !important;
+}
+
+/* Avatars: line art as cobalt-on-cream duotones (filter defined in ThemeDefs). */
+:root[data-theme="scenic"] .atoi-avatar {
+  filter: url(#atoi-duotone-scenic);
+  border-color: var(--color-accent);
+}
+
+:root[data-theme="scenic"] .atoi-btn-primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent) !important;
+  color: var(--color-card);
+}
+:root[data-theme="scenic"] .atoi-btn-primary:hover:not(:disabled) {
+  background: #173f80;
+}
+:root[data-theme="scenic"] .atoi-btn-primary:disabled {
+  background: transparent;
+  border-color: var(--color-line) !important;
+  color: var(--color-muted);
+}
+
+/* The engraved landscape behind the mesh. Hidden in other themes. */
+.atoi-backdrop {
+  display: none;
+}
+:root[data-theme="scenic"] .atoi-backdrop {
+  display: block;
+}

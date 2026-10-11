@@ -1,3 +1,5 @@
+packages:
+  - dashboard
 allowBuilds:
   esbuild@0.28.2: true
   protobufjs@7.6.6: true

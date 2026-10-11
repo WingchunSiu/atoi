@@ -1,0 +1,128 @@
+/*
+ * The default theme: dark, inspired by the Tensorlake brand
+ * (https://www.inspora.design/posts/tensorlake-brand). The original paper theme stays in
+ * tokens.css (?theme=paper); this file overrides its tokens and adds ornaments under
+ * :root[data-theme="tensorlake"], which theme.ts sets unless another theme is chosen.
+ *
+ * Sampled from the brand video: warm near-black #181812, hairline grays, off-white text,
+ * mint #80c088, emerald #0ca87e, deep teal #0c3036. Type: Geist / Geist Mono (OFL) stand in
+ * for the brand's grotesk and mono.
+ *
+ * Contrast on --paper / --card: ink 14.7 / 13.9, muted 6.6 / 6.2, accent 8.8 / 8.3,
+ * amber 7.8, red 6.1, green 8.9 (on card); --line 3.4 / 3.2 (outlines, not text).
+ */
+
+:root[data-theme="tensorlake"] {
+  color-scheme: dark;
+  --color-paper: #161613;
+  --color-card: #1c1c18;
+  --color-hub: #262621;
+  --color-ink: #e8e8e2;
+  --color-muted: #9c9c93;
+  --color-line: #6b6b62;
+  --color-accent: #7fc48c;
+  --color-accent-tint: #0f3330;
+  --color-amber: #d9a656;
+  --color-amber-tint: #33280f;
+  --color-red: #ec7a63;
+  --color-red-tint: #3b1d17;
+  --color-green: #4fd19b;
+  --color-grid: #23231e;
+
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --font-sans: "Geist Sans", ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Labels: small uppercase mono with tracking, like "■ OUR PRODUCTS [02]". */
+:root[data-theme="tensorlake"] .atoi-label {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono);
+}
+:root[data-theme="tensorlake"] .atoi-bullet::before {
+  content: "";
+  display: inline-block;
+  width: 0.55em;
+  height: 0.55em;
+  margin-right: 0.6em;
+  vertical-align: 0.1em;
+  background: var(--color-accent);
+}
+
+/* Panel header bars get the deep-teal fill of the brand's "■ INGREDIENTS" bars. */
+:root[data-theme="tensorlake"] .atoi-panel-header {
+  background: var(--color-accent-tint);
+  border-color: var(--color-line) !important;
+}
+
+/* Headlines in the grotesk, tight. */
+:root[data-theme="tensorlake"] .atoi-headline {
+  font-family: var(--font-sans);
+  letter-spacing: -0.01em;
+}
+
+/* Hub: mint corner brackets around shared state. */
+:root[data-theme="tensorlake"] .atoi-hub {
+  border-color: var(--color-line) !important;
+  position: relative;
+}
+:root[data-theme="tensorlake"] .atoi-hub::before,
+:root[data-theme="tensorlake"] .atoi-hub::after {
+  content: "";
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--color-accent);
+  pointer-events: none;
+}
+:root[data-theme="tensorlake"] .atoi-hub::before {
+  top: -7px;
+  left: -7px;
+  border-right: 0;
+  border-bottom: 0;
+}
+:root[data-theme="tensorlake"] .atoi-hub::after {
+  bottom: -7px;
+  right: -7px;
+  border-left: 0;
+  border-top: 0;
+}
+
+/* Avatars: black line art on mint tiles. */
+:root[data-theme="tensorlake"] .atoi-avatar {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+/* Primary buttons: mint outline, mint text on teal, uppercase mono ("VIEW PRODUCT BREAKDOWN →"). */
+:root[data-theme="tensorlake"] .atoi-btn-primary {
+  background: var(--color-accent-tint);
+  border-color: var(--color-accent) !important;
+  color: var(--color-accent);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-family: var(--font-mono);
+}
+:root[data-theme="tensorlake"] .atoi-btn-primary:hover:not(:disabled) {
+  background: #154440;
+}
+:root[data-theme="tensorlake"] .atoi-btn-primary:disabled {
+  background: transparent;
+  border-color: var(--color-line) !important;
+  color: var(--color-muted);
+}
+
+/* Cards and panels use hairlines instead of heavy ink borders. */
+:root[data-theme="tensorlake"] .border-ink {
+  border-color: var(--color-line);
+}
+:root[data-theme="tensorlake"] .atoi-strong-border {
+  border-color: var(--color-ink) !important;
+}
+
+/* Inputs and the native checkbox. */
+:root[data-theme="tensorlake"] textarea,
+:root[data-theme="tensorlake"] select {
+  background: var(--color-paper);
+  color: var(--color-ink);
+}
