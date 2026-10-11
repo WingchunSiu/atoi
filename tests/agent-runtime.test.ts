@@ -1,7 +1,8 @@
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { AgentBackend } from "../src/agent/backend.js";
 import { executeTurn } from "../src/agent/runtime.js";
 import type { WorkerRequest } from "../src/contracts/runtime.js";
@@ -9,6 +10,7 @@ import { scriptedPi, tool } from "./scripted-pi.js";
 
 const directories: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   await Promise.all(
     directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
   );
@@ -19,6 +21,7 @@ const request = (invocationId: string, checkpoint: string | null = null): Worker
   invocationId,
   generation: 1,
   role: "developer",
+  kind: "worker",
   instructions: "Reuse your knowledge and consult peers.",
   prompt: "Inspect the workspace and consult the reviewer.",
   backendUrl: "https://example.invalid",
@@ -61,6 +64,8 @@ describe("Pi guest persistence with a scripted model", () => {
         expect(session.getActiveToolNames()).toEqual(
           expect.arrayContaining(["read", "bash", "edit", "write", "send_message", "list_agents"]),
         );
+        expect(session.getActiveToolNames()).not.toContain("spawn_agent");
+        expect(session.getActiveToolNames()).not.toContain("complete_objective");
         await scriptedPi(session, [
           [
             tool("write-call", "write", {
@@ -193,4 +198,63 @@ describe("Pi guest persistence with a scripted model", () => {
       "interrupted invocation",
     );
   });
+});
+
+it("uses the configured endpoint through Pi's real HTTP stream and exposes orchestration tools only to its orchestrator", async () => {
+  const calls: Array<{ url?: string; authorization?: string; body: Record<string, unknown> }> = [];
+  const server = createServer(async (req, res) => {
+    let text = "";
+    for await (const chunk of req) text += chunk;
+    calls.push({ url: req.url, authorization: req.headers.authorization, body: JSON.parse(text) });
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const chunk = {
+      id: "fixture",
+      object: "chat.completion.chunk",
+      created: 1,
+      model: "custom-model",
+    };
+    res.write(
+      `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: { role: "assistant", content: "Endpoint connected." }, finish_reason: null }] })}\n\n`,
+    );
+    res.write(
+      `data: ${JSON.stringify({ ...chunk, choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 10, completion_tokens: 3, total_tokens: 13 } })}\n\n`,
+    );
+    res.end("data: [DONE]\n\n");
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as { port: number }).port;
+  vi.stubEnv("ATOI_MODEL_API_KEY", "fixture-custom-endpoint-key");
+  try {
+    const response = await executeTurn(
+      {
+        ...request("custom-endpoint"),
+        kind: "orchestrator",
+        provider: "fixture-provider",
+        model: "custom-model",
+        modelBaseUrl: `http://127.0.0.1:${port}/v1`,
+      },
+      {
+        ...(await fixture()),
+        configureSession(session) {
+          expect(session.getActiveToolNames()).toEqual(
+            expect.arrayContaining(["spawn_agent", "complete_objective"]),
+          );
+        },
+      },
+    );
+    expect(response.outcome).toBe("completed");
+    expect(response.text).toBe("Endpoint connected.");
+    expect(response.usage.costKnown).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      url: "/v1/chat/completions",
+      authorization: "Bearer fixture-custom-endpoint-key",
+      body: { model: "custom-model", stream: true },
+    });
+    expect(response.checkpoint).not.toContain("fixture-custom-endpoint-key");
+  } finally {
+    await new Promise<void>((resolve, reject) =>
+      server.close((error) => (error ? reject(error) : resolve())),
+    );
+  }
 });

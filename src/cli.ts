@@ -51,18 +51,7 @@ switch (command) {
       requestId: randomUUID(),
       repositoryUrl,
       objective,
-      agents: [
-        {
-          role: "implementer",
-          instructions:
-            "Implement the objective, push a task branch and ask a reviewer to verify its exact commit.",
-        },
-        {
-          role: "reviewer",
-          instructions:
-            "Inspect the project, consult the implementer and independently verify the advertised commit.",
-        },
-      ],
+      workerLimit: Number(args[2] ?? 2),
     };
     break;
   }
@@ -92,8 +81,15 @@ switch (command) {
     method = "POST";
     body = {};
     break;
+  case "replace":
+    if (!args[0] || !args[1] || !args[2])
+      throw new Error("Usage: pnpm cli replace <runId> <agentId> <pushed-commit>");
+    endpoint = `/operator/runs/${id.parse(args[0])}/agents/${id.parse(args[1])}/replace`;
+    method = "POST";
+    body = { requestId: randomUUID(), commit: args[2] };
+    break;
   default:
-    throw new Error("Commands: start, status, agent, history, watch, message, stop");
+    throw new Error("Commands: start, status, agent, history, watch, message, stop, replace");
 }
 const response = await fetch(new URL(endpoint, baseUrl), {
   method,

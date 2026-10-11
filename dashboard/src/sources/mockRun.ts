@@ -1,5 +1,5 @@
 // Streams a scripted fixture as if it were a live run, and stands in for the backend's
-// message endpoint. Used in the browser (?source=mock) and by scripts/fake-sse.ts.
+// message endpoint. Used in the browser (?source=mock).
 //
 // Like a real backend, it assigns `seq` and `ts` as each event is written, so messages the
 // operator sends interleave correctly with the scripted events. Replies to the operator are

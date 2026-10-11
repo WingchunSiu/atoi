@@ -46,6 +46,7 @@ it("orders concurrent events transactionally, rejects conflicting retries and re
   const { run, agents } = await team();
   await Promise.all(agents.map((agent) => store.beginInvocation(agent._id)));
   const current = await Promise.all(agents.map((agent) => store.getAgent(agent._id)));
+  const initialEvents = await store.events.countDocuments({ runId: run._id });
   await Promise.all(
     Array.from({ length: 12 }, (_, i) => {
       const agent = current[i % current.length]!;
@@ -83,7 +84,7 @@ it("orders concurrent events transactionally, rejects conflicting retries and re
   );
   const ordered = await store.events.find({ runId: run._id }).sort({ sequence: 1 }).toArray();
   expect(ordered.map((event) => event.sequence)).toEqual(
-    Array.from({ length: 15 }, (_, i) => i + 1),
+    Array.from({ length: initialEvents + 13 }, (_, i) => i + 1),
   );
   const app = createServer(store, { operatorToken, agentSecret });
   try {
@@ -259,9 +260,13 @@ it("streams persisted history and live events, resumes after reconnect, and clos
     }
   }
   try {
-    const first = await receive(0, 1);
-    expect(first[0]!.type).toBe("invocation_started");
-    const after = first[0]!.sequence;
+    const expectedHistory = await store.events
+      .find({ runId: run._id, actorId: agent._id })
+      .sort({ sequence: 1 })
+      .toArray();
+    const first = await receive(0, expectedHistory.length);
+    expect(first.some((event) => event.type === "invocation_started")).toBe(true);
+    const after = first.at(-1)!.sequence;
     const second = await receive(after, 1, () =>
       store.mutateInvocation(agent._id, invocation._id, invocation.generation, (active, session) =>
         store.recordInvocationEvent(

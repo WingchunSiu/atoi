@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useRunState } from "../app/context";
 import type { AgentId, AgentState, RunStatus } from "../contract/events";
-import { AGENT_STATE_LABEL, sha } from "../state/format";
+import { AGENT_STATE_LABEL, sha, truncate } from "../state/format";
 import { matchCommit, roleOf } from "../state/selectors";
 import { actions } from "./uiStore";
 
@@ -29,18 +29,23 @@ export function AgentChip({ id }: { id: AgentId }) {
 
 export function TaskChip({ id }: { id: string }) {
   const state = useRunState();
-  if (!state.tasks[id]) return <span className={`${chip} border-line text-muted`}>{id}</span>;
+  if (!state.tasks[id])
+    return (
+      <span title={id} className={`${chip} border-line text-muted`}>
+        {truncate(id, 13)}
+      </span>
+    );
   return (
     <button
       type="button"
       className={`${chip} border-line bg-card text-ink hover:bg-hub`}
-      title={state.tasks[id].title}
+      title={`${state.tasks[id].title} (${id})`}
       onClick={(e) => {
         e.stopPropagation();
         actions.selectTask(id);
       }}
     >
-      {id}
+      {truncate(id, 13)}
     </button>
   );
 }
@@ -76,6 +81,7 @@ export const AGENT_STATE_COLOR: Record<AgentState, string> = {
 };
 
 export const RUN_STATUS_COLOR: Record<RunStatus, string> = {
+  available: "var(--color-accent)",
   starting: "var(--color-amber)",
   running: "var(--color-accent)",
   completing: "var(--color-accent)",

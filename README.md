@@ -19,7 +19,8 @@ model/tool loop; Modal provides one sandbox per agent; Temporal schedules work;
 Atlas holds durable coordination state and checkpoints; Git holds project files
 and artifacts. The first full milestone targets an orchestrator plus two workers
 and a smoke check adding a third worker. Team continuity is scoped to a run;
-reusing the same team across completed runs remains future work.
+objectives can complete and follow-up tasks can reuse the team until Stop or its
+deadline. Reopening a stopped team remains future work.
 
 ## Implemented
 
@@ -37,20 +38,40 @@ The unified TypeScript harness provides:
 - Native Pi session checkpoints published atomically with inbox acknowledgement.
 - Invocation fencing, confirmed-result reuse and explicit inspection of ambiguous failures.
 - Authenticated activity history and SSE APIs, with CLI replay and observation.
+- A Pi orchestrator with deduplicated spawning, configurable worker limits and reviewed-objective completion.
+- Explicit replacement of idle, checkpointed sandboxes at a pushed commit.
+- A connected dashboard for launching, messaging, inspecting and stopping teams.
 
 The runtime retains each sandbox between turns; idle guests remain alive and billed.
-VM pause/resume and automated sandbox replacement are not implemented. The API's
+VM pause/resume and automatic recovery of interrupted work are not implemented. The API's
 bootstrap registration still creates logical agents only; `/operator/runs` starts
 runtime-enabled agents. Task approval requires an independent reviewer of the exact
 commit, but evidence remains agent-reported rather than trusted evaluator output.
 
 Local tests cover the integrated harness with scripted inference and sandbox fixtures.
-Real Atlas + Modal + Pi + live-model E2E passed, including independent review,
-peer wakeup, native checkpoint history, private file reuse and confirmed cleanup.
-The check uses a read-only public Git commit; private Git push remains unverified. See [runtime setup and
-limits](docs/runtime.md).
+The real Atlas + Modal + Pi + DeepSeek check also completed an orchestrator-driven
+implementation push, independent exact-commit review, Temporal worker restart,
+native checkpoint recovery in a replacement sandbox and confirmed cleanup.
+See [runtime evidence, setup and limits](docs/runtime.md).
 
 ## Run locally
+
+For interactive use, configure `.env` with Atlas, Modal/model access and
+`GITHUB_REPOSITORIES` (repository → scoped Modal Git secret), then run:
+
+```sh
+pnpm build
+pnpm dev:live
+# In a second terminal:
+VITE_API_TARGET=http://127.0.0.1:3200 pnpm dev:dashboard
+```
+
+Open the printed dashboard URL. Enter `ADMIN_TOKEN`, choose a configured repository,
+and provide an objective and acceptance criteria. Empty repositories are supported;
+no fixture files are required. After the objective completes, message the same
+orchestrator for another task. **Stop** or the team lifetime ends the team; idle
+sandboxes remain billed. See [interactive setup and repository access](docs/runtime.md#interactive-teams-and-arbitrary-repository-tasks).
+
 
 Requires Node.js 24+ and pnpm 11.19.0. Use MongoDB Atlas or a replica set; a
 standalone MongoDB server cannot execute the required transactions.
@@ -121,9 +142,8 @@ pnpm cli history <runId> [agentId] [afterCursor]
 pnpm cli watch <runId> [agentId] [afterCursor]
 ```
 
-The browser UI is developed separately against the authenticated backend APIs.
-This runtime includes the activity contract and CLI, with paginated replay and
-reconnecting observation. See [activity APIs and limits](docs/activity.md) and
+The browser UI reads authenticated, paginated domain events from the same Atlas
+event collection. The CLI also exposes raw Pi text and tool results through SSE. See [activity APIs and limits](docs/activity.md) and
 [runtime setup](docs/runtime.md).
 
 ## Checks
@@ -156,13 +176,27 @@ Build output goes to `dist/`. Run the compiled service with `pnpm start`.
 
 ## Dashboard
 
-A browser dashboard for watching a run and messaging the orchestrator lives in
-[`dashboard/`](dashboard/README.md). It runs on scripted mock data and a local fake event
-stream; it is not connected to the coordination service yet.
+With the API and Temporal worker running, start the connected UI:
 
 ```sh
-pnpm --filter atoi-dashboard dev
+pnpm dev:dashboard
 ```
+
+Open `http://localhost:5173`, enter `ADMIN_TOKEN`, a demo repository URL and a
+bounded objective, then launch a team. The operator token stays in this tab's
+session storage. Vite proxies authenticated `/api` requests to `/operator` at
+port 3000; set `VITE_API_TARGET` to change that address. A deployed dashboard
+needs the same proxy over HTTPS. `vite preview` alone is not a production backend.
+
+For a local UI integration demo without cloud credentials, run `pnpm demo:dashboard`
+and `pnpm dev:dashboard` in separate terminals. Use the demo token printed by the
+first command. This runs the real API and a disposable MongoDB replica set with
+**simulated agents**, explicitly labeled in the UI. It proves no cloud or Git
+execution. `?source=mock` retains the fully offline fixtures.
+
+Run `pnpm test:dashboard` and `pnpm build:all` to check both packages.
+See [dashboard usage](dashboard/README.md) and the
+[full writable fixture check](docs/runtime.md#real-e2e-check).
 
 ## Design and contributing
 

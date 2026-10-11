@@ -135,8 +135,8 @@ where retention is more expensive or communication fails.
 
 The long-term product is a personal cloud team that remains available across
 projects and sessions. The first milestone retains agents across turns and tasks
-within one run. Completing a run stops compute; reuse across completed runs is
-deferred. Consult the runtime notes for the current implementation and verification
+within one run. Completing an objective keeps the team available. Stop or the
+team deadline ends compute; reopening stopped teams is deferred. Consult the runtime notes for the current implementation and verification
 status rather than treating milestone acceptance criteria as completed checks.
 
 An agent's durable identity is distinct from its sandbox. Files and dependencies

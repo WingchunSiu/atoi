@@ -255,7 +255,7 @@ export const HubNode = memo(function HubNode() {
   const flash = useActivity(selectFlash);
   const tasks = Object.values(state.tasks);
   const done = tasks.filter((t) => t.status === "done").length;
-  const pushed = Object.values(state.commits).filter((c) => c.pushed).length;
+  const commits = Object.keys(state.commits).length;
   const teamCount = state.messages.filter((m) => m.channelKind === "team").length;
   return (
     <div
@@ -274,7 +274,7 @@ export const HubNode = memo(function HubNode() {
         />
         <HubCount
           label="commits"
-          value={String(pushed)}
+          value={String(commits)}
           flash={flash.includes("commits")}
           onClick={() => actions.openTab("git")}
         />

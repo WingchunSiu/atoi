@@ -277,10 +277,37 @@ describe("reduce", () => {
     };
     const s = fold([ev(u), ev(u)]);
     expect(s.agents.a_1!.usage).toEqual({
+      costKnown: true,
       inputTokens: 200,
       outputTokens: 40,
       costUsd: 0.02,
       durationMs: 2000,
     });
+    const unpriced = fold([ev({ ...u, costKnown: false }), ev(u)]);
+    expect(unpriced.agents.a_1!.usage.costKnown).toBe(false);
   });
+});
+
+it("keeps a completed objective open for follow-ups and preserves its deadline", () => {
+  const deadline = "2026-10-12T00:00:00Z";
+  let state = fold([
+    ev({ type: "run.state", status: "running", deadline }),
+    spawn("o", "orchestrator", "orchestrator"),
+    ev({
+      type: "run.state",
+      status: "available",
+      finalCommit: "a".repeat(40),
+      outcome: "Reviewed",
+    }),
+  ]);
+  expect(state.run?.endedAt).toBeUndefined();
+  expect(state.run?.deadline).toBe(deadline);
+  state = reduce(
+    state,
+    ev({ type: "run.state", status: "running", outcome: "Working on a follow-up task" }),
+  );
+  expect(state.run?.endedAt).toBeUndefined();
+  expect(state.agentOrder).toEqual(["o"]);
+  state = reduce(state, ev({ type: "run.state", status: "cancelled" }));
+  expect(state.run?.endedAt).toBeDefined();
 });

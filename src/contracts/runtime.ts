@@ -17,7 +17,9 @@ export const runInput = z.object({
       }),
     )
     .min(1)
-    .max(8),
+    .max(8)
+    .optional(),
+  workerLimit: z.number().int().min(1).max(8).default(2),
   lifetimeSeconds: z
     .number()
     .int()
@@ -27,6 +29,20 @@ export const runInput = z.object({
   maxInvocationsPerAgent: z.number().int().min(1).max(100).default(20),
 });
 export type RunInput = z.infer<typeof runInput>;
+
+export const spawnInput = z.object({
+  requestId: id,
+  role: z.string().min(1).max(100),
+  instructions: z.string().min(1).max(16_000),
+});
+export const finishInput = z.object({
+  commit: z.string().regex(/^[a-f0-9]{40}$/),
+  summary: z.string().min(1).max(8000),
+});
+export const recoveryInput = z.object({
+  requestId: id,
+  commit: z.string().regex(/^[a-f0-9]{40}$/),
+});
 
 export const sendInput = z.object({
   requestId: id,
@@ -56,12 +72,14 @@ export const workerRequest = z.object({
   invocationId: id,
   generation: z.number().int().positive(),
   role: z.string().min(1).max(100),
+  kind: z.enum(["worker", "orchestrator"]).default("worker"),
   instructions: z.string().max(16_000),
   prompt: z.string().min(1).max(200_000),
   backendUrl: z.url(),
   token: z.string().min(32),
   provider: z.string().min(1),
   model: z.string().min(1),
+  modelBaseUrl: z.url().optional(),
   checkpoint: z.string().max(6_000_000).nullable(),
   budget: z.object({
     timeoutMs: z.number().int().min(1000).max(600_000).multipleOf(1000),
@@ -78,10 +96,12 @@ export const workerResult = z.object({
   text: z.string().max(128_000),
   checkpoint: z.string().max(6_000_000),
   checkpointSha256: z.string().regex(/^[a-f0-9]{64}$/),
+  restoredCheckpoint: z.boolean().optional(),
   usage: z.object({
     input: z.number(),
     output: z.number(),
     cost: z.number(),
+    costKnown: z.boolean().optional(),
     toolCalls: z.number(),
     modelRequests: z.number(),
     elapsedMs: z.number(),

@@ -3,12 +3,15 @@ import type { NewRun, NewTask, TaskResult } from "./schemas.js";
 export interface Run extends NewRun {
   _id: string;
   status: "active" | "stopping" | "stopped";
+  controlPlaneId?: string;
   deadline: Date;
   eventSequence?: number;
   maxInvocationsPerAgent: number;
   workerCount: number;
   orchestratorId: string | null;
   createdAt: Date;
+  completion?: { invocationId: string; commit: string; summary: string; confirmed?: boolean };
+  mock?: boolean;
 }
 export interface Agent {
   _id: string;
@@ -27,6 +30,14 @@ export interface Agent {
   invocationId: string | null;
   tokenHash: string;
   createdAt: Date;
+  spawnHash?: string;
+  recovery?: {
+    requestId: string;
+    commit: string;
+    status: "pending" | "completed" | "failed";
+    provisioningAttempts?: string[];
+    error?: string;
+  };
 }
 export type PublicAgent = Omit<Agent, "tokenHash">;
 export interface Channel {
@@ -63,6 +74,7 @@ export interface Message {
   mentions: string[];
   recipients: string[];
   replyTo?: string;
+  invocationId?: string;
   sequence: number;
   createdAt: Date;
 }

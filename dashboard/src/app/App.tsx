@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
-import { type Resolved, resolveSource } from "../sources/resolve";
+import { operatorToken } from "../sources/live";
+import { type Resolved, resolveSource, sourceKindFromUrl } from "../sources/resolve";
+import { Launch } from "./Launch";
 import { RunView } from "./RunView";
 
 function Message({ title, children }: { title: string; children?: React.ReactNode }) {
@@ -22,6 +24,13 @@ export function App() {
   const [resolved, setResolved] = useState<Resolved | { kind: "loading" }>({ kind: "loading" });
 
   useEffect(() => {
+    if (
+      sourceKindFromUrl(location.search) === "live" &&
+      (!operatorToken() || new URLSearchParams(location.search).has("new"))
+    ) {
+      setResolved({ kind: "no-runs" });
+      return;
+    }
     const abort = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const attempt = async () => {
@@ -45,20 +54,9 @@ export function App() {
     case "loading":
       return <Message title="Connecting…" />;
     case "no-runs":
-      return <Message title="No runs yet. Start one from the CLI and it will appear here." />;
+      return <Launch />;
     case "error":
-      return (
-        <Message title="Couldn't reach the backend.">
-          <p>{resolved.message}</p>
-          <p className="mt-2">
-            To look at scripted data instead, open{" "}
-            <a className="text-accent underline" href="?source=mock">
-              ?source=mock
-            </a>
-            .
-          </p>
-        </Message>
-      );
+      return <Launch error={resolved.message} />;
     case "ready":
       return <RunView source={resolved.source} runs={resolved.runs} />;
   }

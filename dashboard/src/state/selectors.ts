@@ -202,15 +202,17 @@ export function selectUsage(state: RunState) {
       role: a.role,
       tokens: a.usage.inputTokens + a.usage.outputTokens,
       costUsd: a.usage.costUsd,
+      costKnown: a.usage.costKnown !== false,
       activeMs: a.usage.durationMs,
     }));
   const total = rows.reduce(
     (t, r) => ({
       tokens: t.tokens + r.tokens,
       costUsd: t.costUsd + r.costUsd,
+      costKnown: t.costKnown && r.costKnown,
       activeMs: t.activeMs + r.activeMs,
     }),
-    { tokens: 0, costUsd: 0, activeMs: 0 },
+    { tokens: 0, costUsd: 0, activeMs: 0, costKnown: true },
   );
   return { rows, total };
 }

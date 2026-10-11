@@ -14,10 +14,14 @@ const connection = await Connection.connect({
   address: config.TEMPORAL_ADDRESS,
 });
 const client = new Client({ connection, namespace: config.TEMPORAL_NAMESPACE });
-const server = createServer(store, {
-  operatorToken: config.ADMIN_TOKEN,
-  agentSecret: config.AGENT_TOKEN_SECRET,
-});
+const server = createServer(
+  store,
+  {
+    operatorToken: config.ADMIN_TOKEN,
+    agentSecret: config.AGENT_TOKEN_SECRET,
+  },
+  config.GITHUB_REPOSITORIES,
+);
 let closing = false;
 async function relayLoop() {
   while (!closing) {

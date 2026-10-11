@@ -13,6 +13,7 @@ export const USER_ID = "user";
 export type RunStatus =
   | "starting"
   | "running"
+  | "available"
   | "completing"
   | "completed"
   | "failed"
@@ -40,6 +41,8 @@ export interface Task {
   ownerId?: AgentId;
   dependsOn?: string[];
   resultCommit?: string;
+  verification?: string;
+  review?: string;
 }
 
 export interface Envelope {
@@ -59,6 +62,7 @@ export type RunEvent = Envelope &
         objective?: string;
         repo?: string;
         workerLimit?: number;
+        deadline?: string;
         finalCommit?: string;
         outcome?: string;
       }
@@ -107,6 +111,7 @@ export type RunEvent = Envelope &
         inputTokens: number;
         outputTokens: number;
         costUsd: number;
+        costKnown?: boolean;
         durationMs: number;
       }
     | { type: "worker.restarted" }
@@ -130,7 +135,15 @@ export type DashboardEvent = RunEvent | UnknownEvent;
 // zod schemas
 
 const id = z.string().min(1);
-const runStatus = z.enum(["starting", "running", "completing", "completed", "failed", "cancelled"]);
+const runStatus = z.enum([
+  "starting",
+  "running",
+  "available",
+  "completing",
+  "completed",
+  "failed",
+  "cancelled",
+]);
 const agentState = z.enum([
   "provisioning",
   "waiting",
@@ -156,6 +169,8 @@ export const taskSchema = z.object({
   ownerId: id.optional(),
   dependsOn: z.array(id).optional(),
   resultCommit: z.string().optional(),
+  verification: z.string().optional(),
+  review: z.string().optional(),
 });
 
 export const envelopeSchema = z.object({
@@ -173,6 +188,7 @@ const payloadSchemas = {
     objective: z.string().optional(),
     repo: z.string().optional(),
     workerLimit: z.number().int().nonnegative().optional(),
+    deadline: isoTime.optional(),
     finalCommit: z.string().optional(),
     outcome: z.string().optional(),
   }),
@@ -229,6 +245,7 @@ const payloadSchemas = {
     inputTokens: z.number().nonnegative(),
     outputTokens: z.number().nonnegative(),
     costUsd: z.number().nonnegative(),
+    costKnown: z.boolean().optional(),
     durationMs: z.number().nonnegative(),
   }),
   "worker.restarted": z.object({}),

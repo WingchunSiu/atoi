@@ -128,10 +128,10 @@ coordination and model/Git access. See [engineering rules](../AGENTS.md).
 
 ## Persistence and sandbox lifecycle
 
-Task completion is different from run completion. During a run, an agent keeps
-its inbox and checkpoint between turns and tasks. A workflow can wait without an
-open model call. At run completion, archive its records and checkpoints and stop
-its compute. Reusing the same team across completed runs remains a later milestone.
+Objective completion is different from team shutdown. During a run, an agent keeps
+its inbox and checkpoint between turns, tasks and completed objectives. A workflow
+can wait without an open model call. Explicit Stop or the team deadline archives
+records and checkpoints and stops compute. Reopening stopped teams is deferred.
 
 For the current prototype, assume each run stays below Modal's 24-hour maximum;
 proactive sandbox rotation is outside scope. Still configure an explicit sandbox

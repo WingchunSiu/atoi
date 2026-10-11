@@ -47,7 +47,13 @@ export interface AgentView {
     generation: number;
     detail?: string;
   }[];
-  usage: { inputTokens: number; outputTokens: number; costUsd: number; durationMs: number };
+  usage: {
+    inputTokens: number;
+    outputTokens: number;
+    costUsd: number;
+    durationMs: number;
+    costKnown?: boolean;
+  };
 }
 
 export interface TaskView extends Task {
@@ -115,6 +121,7 @@ export interface RunState {
     objective?: string;
     repo?: string;
     workerLimit?: number;
+    deadline?: string;
     startedAt?: string;
     endedAt?: string;
     finalCommit?: string;
@@ -263,6 +270,7 @@ const handlers: { [T in DashboardEvent["type"]]?: Handler<T> } = {
     if (e.objective !== undefined) run.objective = e.objective;
     if (e.repo !== undefined) run.repo = e.repo;
     if (e.workerLimit !== undefined) run.workerLimit = e.workerLimit;
+    if (e.deadline !== undefined) run.deadline = e.deadline;
     if (e.finalCommit !== undefined) run.finalCommit = e.finalCommit;
     if (e.outcome !== undefined) run.outcome = e.outcome;
     run.startedAt ??= e.ts;
@@ -458,7 +466,20 @@ const handlers: { [T in DashboardEvent["type"]]?: Handler<T> } = {
       createdBy: prev ? prev.createdBy : e.agentId,
       history: changed ? [...(prev?.history ?? []), entry] : prev.history,
     };
-    return { ...s, tasks: { ...s.tasks, [task.id]: task } };
+    const commits =
+      task.resultCommit && !s.commits[task.resultCommit]
+        ? {
+            ...s.commits,
+            [task.resultCommit]: {
+              sha: task.resultCommit,
+              seq: e.seq,
+              pushed: false,
+              verifications: [],
+              message: `Submitted artifact: ${task.title}`,
+            },
+          }
+        : s.commits;
+    return { ...s, commits, tasks: { ...s.tasks, [task.id]: task } };
   },
 
   "tool.called": (s, e) =>
@@ -520,6 +541,7 @@ const handlers: { [T in DashboardEvent["type"]]?: Handler<T> } = {
             inputTokens: a.usage.inputTokens + e.inputTokens,
             outputTokens: a.usage.outputTokens + e.outputTokens,
             costUsd: a.usage.costUsd + e.costUsd,
+            costKnown: a.usage.costKnown !== false && e.costKnown !== false,
             durationMs: a.usage.durationMs + e.durationMs,
           },
         })),

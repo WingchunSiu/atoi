@@ -18,7 +18,7 @@ const modal = new ModalAgents(modalClient, {
   imageTag: config.MODAL_IMAGE_TAG,
   modelSecret: config.MODAL_MODEL_SECRET,
   modelApiKey: config.ATOI_MODEL_API_KEY,
-  gitSecret: config.MODAL_GIT_SECRET,
+  repositorySecrets: config.GITHUB_REPOSITORIES,
 });
 const connection = await NativeConnection.connect({
   address: config.TEMPORAL_ADDRESS,

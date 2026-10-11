@@ -1,8 +1,23 @@
-import type { SendMessageRequest, SendMessageResponse } from "../contract/events";
+import type { SendMessageRequest } from "../contract/events";
 import { ingest, type RunSource, type SendResult, type SourceSink } from "./types";
 
-const RETRY_MS = 4000;
-
+export const operatorToken = () => sessionStorage.getItem("atoi.operatorToken") ?? "";
+export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(`/api${path}`, {
+    ...init,
+    headers: {
+      accept: "application/json",
+      "content-type": "application/json",
+      authorization: `Bearer ${operatorToken()}`,
+      ...init.headers,
+    },
+  });
+  const body = await response
+    .json()
+    .catch(() => ({ message: "Backend did not return JSON. Check the API proxy." }));
+  if (!response.ok) throw new Error(body.message ?? `Backend returned ${response.status}`);
+  return body as T;
+}
 export interface RunSummary {
   id: string;
   objective?: string;
@@ -10,128 +25,88 @@ export interface RunSummary {
   startedAt?: string;
   mock?: boolean;
 }
-
 export async function fetchRuns(signal?: AbortSignal): Promise<RunSummary[]> {
-  const res = await fetch("/api/runs", { signal, headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`GET /api/runs returned ${res.status}`);
-  const type = res.headers.get("content-type") ?? "";
-  if (!type.includes("json"))
-    throw new Error(
-      "GET /api/runs did not return JSON. Is the backend (or npm run fake-sse) running?",
-    );
-  const body = (await res.json()) as { runs?: RunSummary[] };
-  return Array.isArray(body.runs) ? body.runs : [];
+  const runs = await api<
+    Array<{ _id: string; objective: string; status: string; createdAt: string; mock?: boolean }>
+  >("/runs", { signal });
+  return runs.map((run) => ({
+    id: run._id,
+    objective: run.objective,
+    status: run.status,
+    startedAt: run.createdAt,
+    mock: !!run.mock,
+  }));
 }
 
-/**
- * Opens an EventSource on /api/runs/:runId/events. The browser reconnects on its own and sends
- * Last-Event-ID; if the stream fails for good, we retry with ?after=<lastSeq>.
- */
+/** Poll persisted pages with an abortable request; browser lifetime never owns run lifetime. */
 export class LiveSource implements RunSource {
   readonly kind = "live" as const;
-  private es: EventSource | undefined;
-  private sink: SourceSink | undefined;
-  private lastSeq = 0;
-  private retryTimer: ReturnType<typeof setTimeout> | undefined;
-  private stopped = false;
-
+  private cursor = 0;
+  private abort?: AbortController;
+  private timer?: ReturnType<typeof setTimeout>;
+  private sink?: SourceSink;
   constructor(
     readonly runId: string,
-    readonly mock: boolean,
+    readonly mock = false,
   ) {}
-
   async send(req: SendMessageRequest): Promise<SendResult> {
-    let res: Response;
     try {
-      res = await fetch(`/api/runs/${encodeURIComponent(this.runId)}/messages`, {
-        method: "POST",
-        headers: { "content-type": "application/json", accept: "application/json" },
-        body: JSON.stringify(req),
-      });
-    } catch (err) {
-      return { ok: false, error: `Couldn't reach the backend (${String(err)}).` };
+      const message = await api<{ _id: string }>(
+        `/runs/${encodeURIComponent(this.runId)}/messages`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            requestId: req.clientRequestId,
+            body: req.body,
+            ...(req.to === "team" ? {} : { recipientId: req.to }),
+            mentions: [],
+          }),
+        },
+      );
+      return { ok: true, messageId: message._id };
+    } catch (error) {
+      return { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    if (!res.ok) {
-      const detail = await res
-        .json()
-        .then((b: { error?: string }) => b.error)
-        .catch(() => undefined);
-      const hint =
-        res.status === 404 || res.status === 405 ? " The backend may not accept messages yet." : "";
-      return {
-        ok: false,
-        status: res.status,
-        error: `${detail ?? `The backend returned ${res.status}.`}${hint}`,
-      };
-    }
-    const body = (await res.json().catch(() => ({}))) as Partial<SendMessageResponse>;
-    return { ok: true, messageId: body.messageId ?? "" };
   }
-
   start(sink: SourceSink): () => void {
     this.sink = sink;
-    this.stopped = false;
-    this.open();
+    this.retry();
     return () => {
-      this.stopped = true;
-      clearTimeout(this.retryTimer);
-      this.es?.close();
+      this.abort?.abort();
+      clearTimeout(this.timer);
+      this.sink = undefined;
     };
   }
-
   retry() {
-    clearTimeout(this.retryTimer);
-    this.es?.close();
-    this.open();
+    this.abort?.abort();
+    clearTimeout(this.timer);
+    this.abort = new AbortController();
+    void this.poll(this.abort.signal);
   }
-
-  private open() {
-    const sink = this.sink!;
-    sink.status({ state: this.lastSeq ? "reconnecting" : "connecting" });
-    const after = this.lastSeq ? `?after=${this.lastSeq}` : "";
-    const es = new EventSource(`/api/runs/${encodeURIComponent(this.runId)}/events${after}`);
-    this.es = es;
-    es.onopen = () => sink.status({ state: "open" });
-    es.onmessage = (msg) => {
-      const seq = ingest(msg.data, sink);
-      if (seq !== undefined && seq > this.lastSeq) this.lastSeq = seq;
-    };
-    es.onerror = () => {
-      if (this.stopped) return;
-      if (es.readyState === EventSource.CONNECTING) {
-        sink.status({
-          state: "reconnecting",
-          message: "Lost connection to the backend. Reconnecting…",
-        });
-        return;
-      }
-      // Closed for good (for example a 404 or 500 on connect). Find out why, then retry.
-      es.close();
-      void this.diagnose();
-    };
-  }
-
-  private async diagnose() {
-    const sink = this.sink!;
+  private async poll(signal: AbortSignal) {
+    if (!this.sink || signal.aborted) return;
     try {
-      const runs = await fetchRuns();
-      if (!runs.some((r) => r.id === this.runId)) {
-        sink.status({
-          state: "error",
-          notFound: true,
-          message: `Run ${this.runId} isn't on the backend. Pick another run.`,
-        });
-        return;
+      let more = true;
+      while (more && !signal.aborted) {
+        const page = await api<{ events: unknown[]; cursor: number; hasMore: boolean }>(
+          `/runs/${encodeURIComponent(this.runId)}/dashboard-events?after=${this.cursor}`,
+          { signal },
+        );
+        if (signal.aborted || !this.sink) return;
+        for (const event of page.events) ingest(JSON.stringify(event), this.sink);
+        this.cursor = page.cursor;
+        more = page.hasMore;
       }
-    } catch {
-      // Backend unreachable; fall through to the retry countdown.
+      this.sink?.status({ state: "open" });
+      this.timer = setTimeout(() => void this.poll(signal), 1500);
+    } catch (error) {
+      if (signal.aborted || !this.sink) return;
+      this.sink.status({
+        state: "error",
+        message: error instanceof Error ? error.message : String(error),
+        retryInMs: 4000,
+      });
+      this.timer = setTimeout(() => void this.poll(signal), 4000);
     }
-    if (this.stopped) return;
-    sink.status({
-      state: "error",
-      retryInMs: RETRY_MS,
-      message: "Lost connection to the backend.",
-    });
-    this.retryTimer = setTimeout(() => this.open(), RETRY_MS);
   }
 }

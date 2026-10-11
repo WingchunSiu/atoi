@@ -14,13 +14,18 @@ import { MongoMemoryReplSet } from "mongodb-memory-server-core";
 import { createServer } from "../src/api/server.js";
 import { ModalAgents } from "../src/modal/provider.js";
 import type { Agent } from "../src/model.js";
+import { repositorySecret, repositorySecretsSchema } from "../src/repositories.js";
 import { MongoStore } from "../src/store/mongo.js";
 import { createActivities } from "../src/temporal/activities.js";
 import { reconcile } from "../src/temporal/relay.js";
+import { exerciseOrchestration, fixtureObjective } from "./e2e-orchestration.js";
 
 // Real Pi, Modal and model inference. Local DB requires an explicit opt-in and
-// never counts as an Atlas verification. No Git branches are pushed by this check.
+// never counts as an Atlas verification. Setting E2E_REPOSITORY enables the writable fixture check.
 const localDatabase = process.env.E2E_LOCAL_DB === "1";
+const repository = process.env.E2E_REPOSITORY;
+const repositorySecrets = repositorySecretsSchema.parse(process.env.GITHUB_REPOSITORIES);
+if (repository) repositorySecret(repository, repositorySecrets);
 if (!localDatabase && !process.env.MONGODB_URI)
   throw new Error(
     "Set MONGODB_URI in .env for Atlas, or E2E_LOCAL_DB=1 for an explicitly local database check.",
@@ -29,7 +34,7 @@ const modelApiKey = process.env.ATOI_MODEL_API_KEY ?? process.env.OPENAI_API_KEY
 if (!modelApiKey && !process.env.MODAL_MODEL_SECRET)
   throw new Error("Configure ATOI_MODEL_API_KEY or MODAL_MODEL_SECRET for real model inference.");
 const agentSecret = randomBytes(32).toString("hex");
-const operatorToken = randomBytes(32).toString("hex");
+const operatorToken = process.env.ADMIN_TOKEN ?? randomBytes(32).toString("hex");
 const marker = `violet-raven-${randomUUID()}`;
 const taskQueue = `atoi-e2e-${randomUUID()}`;
 function safeError(error: unknown): string {
@@ -45,7 +50,9 @@ const report: Record<string, unknown> = {
   realPi: true,
   realModel: true,
   temporal: "real local service",
-  git: "read-only public fixture; no new pushed implementation",
+  git: repository
+    ? `pushed implementation fixture: ${repository}`
+    : "read-only public fixture; no new pushed implementation",
 };
 let database: MongoMemoryReplSet | undefined;
 let mongo: MongoClient | undefined;
@@ -68,7 +75,9 @@ async function waitFor(predicate: () => Promise<boolean>, label: string, timeout
     if (Date.now() > until) throw new Error(`Timed out waiting for ${label}`);
     if (relayFailure) throw new Error(`Relay failed: ${relayFailure.name}`);
     if (store && runId) {
-      const failed = await store.agents.find({ runId, status: "needs_inspection" }).next();
+      const failed = await store.agents
+        .find({ runId, status: "needs_inspection", "recovery.status": { $ne: "pending" } })
+        .next();
       if (failed)
         throw new Error(
           `Agent ${failed.role} needs inspection; inspect persisted invocation results.`,
@@ -151,7 +160,11 @@ try {
   Runtime.install({ logger: new DefaultLogger("ERROR") });
   temporal = await TestWorkflowEnvironment.createLocal();
   api = createServer(store, { operatorToken, agentSecret });
-  const localUrl = await api.listen({ host: "127.0.0.1", port: 0 });
+  const localUrl = await api.listen({
+    host: "127.0.0.1",
+    port: Number(process.env.E2E_API_PORT ?? 0),
+  });
+  console.log(`Local E2E API: ${localUrl}`);
   const backendUrl = process.env.E2E_BACKEND_URL ?? (await startTunnel(localUrl));
   await waitFor(() => publicBackendReady(backendUrl), "public backend", 60000);
   console.log("Backend reachable over HTTPS; starting real Modal/Pi workers.");
@@ -161,50 +174,90 @@ try {
     imageTag: process.env.MODAL_IMAGE_TAG ?? "node:24-bookworm-slim",
     modelSecret: process.env.MODAL_MODEL_SECRET,
     modelApiKey,
+    repositorySecrets: repository ? repositorySecrets : undefined,
   });
   const activities = createActivities(store, provider, {
     BACKEND_PUBLIC_URL: backendUrl,
     AGENT_TOKEN_SECRET: agentSecret,
     PI_PROVIDER: process.env.PI_PROVIDER ?? "openai",
     PI_MODEL: process.env.PI_MODEL ?? "gpt-4.1",
-    TURN_TIMEOUT_MS: 120000,
-    TURN_MODEL_REQUESTS: 12,
-    TURN_TOOL_CALLS: 24,
+    PI_BASE_URL: process.env.PI_BASE_URL,
+    TURN_TIMEOUT_MS: 180000,
+    TURN_MODEL_REQUESTS: 24,
+    TURN_TOOL_CALLS: 40,
   });
-  worker = await Worker.create({
+  const workerOptions = {
     connection: temporal.nativeConnection,
     taskQueue,
     workflowsPath: fileURLToPath(new URL("../src/temporal/workflows.ts", import.meta.url)),
     activities,
-    maxConcurrentActivityTaskExecutions: 2,
-  });
+    maxConcurrentActivityTaskExecutions: 3,
+  };
+  worker = await Worker.create(workerOptions);
   workerRun = worker.run();
-  const start = await api.inject({
-    method: "POST",
-    url: "/operator/runs",
-    headers: { authorization: `Bearer ${operatorToken}` },
-    payload: {
-      requestId: randomUUID(),
-      repositoryUrl: "https://github.com/octocat/Hello-World.git",
-      objective:
-        "Independently verify that the current public repository README contains the greeting Hello World. Complete exactly one reviewed task and exchange a direct peer reply.",
-      lifetimeSeconds: 1200,
-      maxInvocationsPerAgent: 6,
-      agents: [
-        {
-          role: "implementer",
-          instructions: `You initiate exactly one task. Use list_agents to find the reviewer. Create a task with title and acceptanceCriteria array; claim it and keep its version. Inspect the actual README and current Git SHA using bash. Run a Python assertion that README contains Hello World (case insensitive) and print README_CHECK_PASSED on success. Write verification-note.md in your private workspace containing the exact marker ${marker}. Submit in_review with the exact existing commit, actual verification notes and reviewerId. DM the reviewer with task ID and commit. Then finish this turn immediately; do not poll. When woken by the approval reply, read verification-note.md using read, list_tasks to confirm done, write a work log containing the exact marker and the approved commit, and finish. Do not create another task. No Git push is required: this is a read-only verification task on an existing public commit.`,
-        },
-        {
-          role: "reviewer",
-          instructions:
-            "Initially wait for an explicit review DM; finish your turn without polling or claiming work. When a review DM arrives, list_tasks to obtain the latest version and exact submitted commit. Independently inspect that exact commit in your own Git clone and run a Python assertion on its README for Hello World (case insensitive), printing README_CHECK_PASSED on success. Use update_task to approve done with expectedVersion and review:{commit,verification}. Only approve if your actual assertion passes. Then DM the implementer with APPROVED and the commit. Finish the turn; do not poll. No Git push is required.",
-        },
-      ],
-    },
-  });
-  assert.equal(start.statusCode, 200, start.body);
-  const started = start.json();
+  let started: { run: { _id: string }; agents: Agent[] };
+  if (repository && process.env.E2E_LAUNCH_FROM_UI === "1") {
+    const waitingSince = new Date();
+    console.log(
+      "Ready for browser launch: use the configured fixture repository, fixtureObjective from scripts/e2e-orchestration.ts, 2 workers and a 40-minute limit.",
+    );
+    let browserRun: Awaited<ReturnType<MongoStore["getRun"]>> | null = null;
+    await waitFor(
+      async () => {
+        browserRun = await store!.runs.findOne({
+          repository,
+          objective: fixtureObjective,
+          status: "active",
+          createdAt: { $gte: waitingSince },
+        });
+        return !!browserRun;
+      },
+      "operator launch through the dashboard",
+      300000,
+    );
+    started = {
+      run: browserRun!,
+      agents: await store.agents.find({ runId: browserRun!._id }).toArray(),
+    };
+    report.launch = "browser";
+  } else {
+    const start = await api.inject({
+      method: "POST",
+      url: "/operator/runs",
+      headers: { authorization: `Bearer ${operatorToken}` },
+      payload: repository
+        ? {
+            requestId: randomUUID(),
+            repositoryUrl: repository,
+            objective: fixtureObjective,
+            workerLimit: 2,
+            lifetimeSeconds: 2400,
+            maxInvocationsPerAgent: 30,
+          }
+        : {
+            requestId: randomUUID(),
+            repositoryUrl: "https://github.com/octocat/Hello-World.git",
+            objective:
+              "Independently verify that the current public repository README contains the greeting Hello World. Complete exactly one reviewed task and exchange a direct peer reply.",
+            lifetimeSeconds: 1200,
+            maxInvocationsPerAgent: 6,
+            agents: [
+              {
+                role: "implementer",
+                instructions: `You initiate exactly one task. Use list_agents to find the reviewer. Create a task with title and acceptanceCriteria array; claim it and keep its version. Inspect the actual README and current Git SHA using bash. Run a Python assertion that README contains Hello World (case insensitive) and print README_CHECK_PASSED on success. Write verification-note.md in your private workspace containing the exact marker ${marker}. Submit in_review with the exact existing commit, actual verification notes and reviewerId. DM the reviewer with task ID and commit. Then finish this turn immediately; do not poll. When woken by the approval reply, read verification-note.md using read, list_tasks to confirm done, write a work log containing the exact marker and the approved commit, and finish. Do not create another task. No Git push is required: this is a read-only verification task on an existing public commit.`,
+              },
+              {
+                role: "reviewer",
+                instructions:
+                  "Initially wait for an explicit review DM; finish your turn without polling or claiming work. When a review DM arrives, list_tasks to obtain the latest version and exact submitted commit. Independently inspect that exact commit in your own Git clone and run a Python assertion on its README for Hello World (case insensitive), printing README_CHECK_PASSED on success. Use update_task to approve done with expectedVersion and review:{commit,verification}. Only approve if your actual assertion passes. Then DM the implementer with APPROVED and the commit. Finish the turn; do not poll. No Git push is required.",
+              },
+            ],
+          },
+    });
+    assert.equal(start.statusCode, 200, start.body);
+    started = start.json();
+    report.launch = "API";
+  }
   runId = started.run._id;
   agents = started.agents;
   report.runId = runId;
@@ -215,7 +268,7 @@ try {
     if (relayBusy) return;
     relayBusy = true;
     try {
-      await reconcile(store!, temporal!.client, taskQueue);
+      await reconcile(store!, temporal!.client, taskQueue, runId!);
       relayFailure = undefined;
     } catch (error) {
       relayFailure = error as Error;
@@ -225,137 +278,172 @@ try {
   };
   relayTimer = setInterval(() => void relay(), 500);
   await relay();
-  const implementer = agents.find((a) => a.role === "implementer")!;
-  const reviewer = agents.find((a) => a.role === "reviewer")!;
-  await waitFor(
-    async () => {
-      const task = await store!.tasks.findOne({ runId, status: "done" });
-      return (
-        !!task &&
-        (await store!.getAgent(implementer._id)).status === "idle" &&
-        (await store!.getAgent(implementer._id)).turns >= 2 &&
-        !!(await store!.events.findOne({
-          runId,
-          actorId: implementer._id,
-          kind: "work_log",
-          "details.payload.note": { $regex: marker },
-        }))
-      );
-    },
-    "real peer review and checkpointed follow-up",
-    600000,
-  );
-  const task = await store.tasks.findOne({ runId, status: "done" });
-  assert.equal(task!.ownerId, implementer._id);
-  assert.equal(task!.reviewerId, reviewer._id);
-  assert.equal(task!.review!.commit, task!.result!.commit);
-  assert.ok((await store.checkpoint(await store.getAgent(implementer._id)))!.includes(marker));
-  const actualAgents = await store.agents.find({ runId }).toArray();
-  for (const agent of actualAgents) {
-    assert.ok(agent.sandboxId);
-    assert.ok(await store.checkpoint(agent));
-    assert.equal(
-      await store.deliveries.countDocuments({
-        recipientId: agent._id,
-        status: { $ne: "completed" },
+  if (repository) {
+    Object.assign(
+      report,
+      await exerciseOrchestration({
+        store,
+        runId: runId!,
+        api,
+        headers: { authorization: `Bearer ${operatorToken}` },
+        modal: modalClient,
+        waitFor,
+        async stopWorker() {
+          worker!.shutdown();
+          await workerRun;
+          worker = undefined;
+        },
+        async startWorker() {
+          worker = await Worker.create(workerOptions);
+          workerRun = worker.run();
+        },
       }),
-      0,
     );
-    const outputs = await store.events
-      .find({ runId, actorId: agent._id, kind: "tool_execution_end" })
+    agents = await store.agents.find({ runId }).toArray();
+    report.status = "passed";
+    report.agents = agents.map(({ tokenHash: _token, ...agent }) => agent);
+    report.invocations = await store.invocations
+      .find({ agentId: { $in: agents.map((agent) => agent._id) } })
+      .toArray();
+    console.log(
+      "PASS: orchestrated implementation, independent review, worker restart, sandbox replacement and cleanup.",
+    );
+  } else {
+    const implementer = agents.find((a) => a.role === "implementer")!;
+    const reviewer = agents.find((a) => a.role === "reviewer")!;
+    await waitFor(
+      async () => {
+        const task = await store!.tasks.findOne({ runId, status: "done" });
+        return (
+          !!task &&
+          (await store!.getAgent(implementer._id)).status === "idle" &&
+          (await store!.getAgent(implementer._id)).turns >= 2 &&
+          !!(await store!.events.findOne({
+            runId,
+            actorId: implementer._id,
+            kind: "work_log",
+            "details.payload.note": { $regex: marker },
+          }))
+        );
+      },
+      "real peer review and checkpointed follow-up",
+      600000,
+    );
+    const task = await store.tasks.findOne({ runId, status: "done" });
+    assert.equal(task!.ownerId, implementer._id);
+    assert.equal(task!.reviewerId, reviewer._id);
+    assert.equal(task!.review!.commit, task!.result!.commit);
+    assert.ok((await store.checkpoint(await store.getAgent(implementer._id)))!.includes(marker));
+    const actualAgents = await store.agents.find({ runId }).toArray();
+    for (const agent of actualAgents) {
+      assert.ok(agent.sandboxId);
+      assert.ok(await store.checkpoint(agent));
+      assert.equal(
+        await store.deliveries.countDocuments({
+          recipientId: agent._id,
+          status: { $ne: "completed" },
+        }),
+        0,
+      );
+      const outputs = await store.events
+        .find({ runId, actorId: agent._id, kind: "tool_execution_end" })
+        .toArray();
+      assert.ok(
+        outputs.some((event) => JSON.stringify(event.details).includes("README_CHECK_PASSED")),
+        `${agent.role} must actually execute verification`,
+      );
+    }
+    const turns = await store.invocations
+      .find({ agentId: implementer._id, status: "completed" })
+      .sort({ generation: 1 })
+      .toArray();
+    assert.ok(turns.length >= 2);
+    let previousEntries: { id?: string; type: string }[] | undefined;
+    for (const turn of turns) {
+      const checkpoint: { jsonl: string } | null = await store.checkpoints.findOne({
+        _id: turn._id,
+      });
+      assert.ok(checkpoint);
+      const entries: { id?: string; type: string }[] = checkpoint.jsonl
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line));
+      assert.equal(entries[0]!.type, "session");
+      if (previousEntries) {
+        assert.equal(
+          entries[0]!.id,
+          previousEntries[0]!.id,
+          "Native Pi session identity must persist",
+        );
+        const entryIds = new Set(entries.map((entry) => entry.id));
+        for (const entry of previousEntries)
+          if (entry.id)
+            assert.ok(entryIds.has(entry.id), "Prior native session entries must survive");
+      }
+      previousEntries = entries;
+    }
+    const followupReads = await store.events
+      .find({
+        runId,
+        actorId: implementer._id,
+        kind: "tool_execution_end",
+        "details.invocationId": turns.at(-1)!._id,
+        "details.payload.toolName": "read",
+        "details.payload.isError": { $ne: true },
+      })
       .toArray();
     assert.ok(
-      outputs.some((event) => JSON.stringify(event.details).includes("README_CHECK_PASSED")),
-      `${agent.role} must actually execute verification`,
+      followupReads.some((event) => JSON.stringify(event.details).includes(marker)),
+      "Follow-up must actually read the retained private file",
     );
-  }
-  const turns = await store.invocations
-    .find({ agentId: implementer._id, status: "completed" })
-    .sort({ generation: 1 })
-    .toArray();
-  assert.ok(turns.length >= 2);
-  let previousEntries: { id?: string; type: string }[] | undefined;
-  for (const turn of turns) {
-    const checkpoint: { jsonl: string } | null = await store.checkpoints.findOne({ _id: turn._id });
-    assert.ok(checkpoint);
-    const entries: { id?: string; type: string }[] = checkpoint.jsonl
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    assert.equal(entries[0]!.type, "session");
-    if (previousEntries) {
-      assert.equal(
-        entries[0]!.id,
-        previousEntries[0]!.id,
-        "Native Pi session identity must persist",
+    const guest = await modalClient.sandboxes.fromId(
+      (await store.getAgent(implementer._id)).sandboxId!,
+    );
+    try {
+      assert.ok(
+        (await guest.filesystem.readText("/workspace/repo/verification-note.md")).includes(marker),
       );
-      const entryIds = new Set(entries.map((entry) => entry.id));
-      for (const entry of previousEntries)
-        if (entry.id)
-          assert.ok(entryIds.has(entry.id), "Prior native session entries must survive");
+    } finally {
+      guest.detach();
     }
-    previousEntries = entries;
-  }
-  const followupReads = await store.events
-    .find({
+    const channel = await store.channels.findOne({
       runId,
-      actorId: implementer._id,
-      kind: "tool_execution_end",
-      "details.invocationId": turns.at(-1)!._id,
-      "details.payload.toolName": "read",
-      "details.payload.isError": { $ne: true },
-    })
-    .toArray();
-  assert.ok(
-    followupReads.some((event) => JSON.stringify(event.details).includes(marker)),
-    "Follow-up must actually read the retained private file",
-  );
-  const guest = await modalClient.sandboxes.fromId(
-    (await store.getAgent(implementer._id)).sandboxId!,
-  );
-  try {
+      kind: "dm",
+      participants: { $all: [implementer._id, reviewer._id] },
+    });
+    assert.ok(channel);
     assert.ok(
-      (await guest.filesystem.readText("/workspace/repo/verification-note.md")).includes(marker),
+      await store.messages.findOne({
+        runId,
+        channelId: channel._id,
+        senderId: reviewer._id,
+        body: { $regex: "APPROVED" },
+      }),
     );
-  } finally {
-    guest.detach();
+    report.status = "passed";
+    report.task = task;
+    report.agents = actualAgents.map(({ tokenHash: _token, ...agent }) => agent);
+    report.invocations = await store.invocations
+      .find({ agentId: { $in: agents.map((a) => a._id) } })
+      .toArray();
+    report.messages = await store.messages.find({ runId }).toArray();
+    report.checks = [
+      "real model/tool execution in separate Modal guests",
+      "independent exact-commit review",
+      "durable DM delivery and Temporal wakeup",
+      "native Pi session checkpoint and private file reuse",
+      "delivery acknowledgement only with checkpoint publication",
+    ];
+    console.log(
+      "PASS: real peer collaboration, independent review, Modal workspace reuse and Pi checkpoint follow-up.",
+    );
   }
-  const channel = await store.channels.findOne({
-    runId,
-    kind: "dm",
-    participants: { $all: [implementer._id, reviewer._id] },
-  });
-  assert.ok(channel);
-  assert.ok(
-    await store.messages.findOne({
-      runId,
-      channelId: channel._id,
-      senderId: reviewer._id,
-      body: { $regex: "APPROVED" },
-    }),
-  );
-  report.status = "passed";
-  report.task = task;
-  report.agents = actualAgents.map(({ tokenHash: _token, ...agent }) => agent);
-  report.invocations = await store.invocations
-    .find({ agentId: { $in: agents.map((a) => a._id) } })
-    .toArray();
-  report.messages = await store.messages.find({ runId }).toArray();
-  report.checks = [
-    "real model/tool execution in separate Modal guests",
-    "independent exact-commit review",
-    "durable DM delivery and Temporal wakeup",
-    "native Pi session checkpoint and private file reuse",
-    "delivery acknowledgement only with checkpoint publication",
-  ];
-  console.log(
-    "PASS: real peer collaboration, independent review, Modal workspace reuse and Pi checkpoint follow-up.",
-  );
 } catch (error) {
   report.status = "failed";
   report.error = safeError(error);
   if (store && runId) {
-    report.agents = await store.agents.find({ runId }, { projection: { tokenHash: 0 } }).toArray();
+    agents = await store.agents.find({ runId }).toArray();
+    report.agents = agents.map(({ tokenHash: _token, ...agent }) => agent);
     report.invocations = await store.invocations
       .find({ agentId: { $in: agents.map((a) => a._id) } })
       .toArray();
@@ -364,10 +452,11 @@ try {
   console.error(`E2E failed: ${report.error}`);
 } finally {
   if (store && runId) {
+    agents = await store.agents.find({ runId }).toArray();
     try {
       await store.stopRun(runId);
       if (temporal) {
-        await reconcile(store, temporal.client, taskQueue);
+        await reconcile(store, temporal.client, taskQueue, runId);
         await waitFor(
           async () => (await store!.getRun(runId!)).status === "stopped",
           "sandbox cleanup",

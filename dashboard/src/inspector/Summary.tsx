@@ -206,14 +206,16 @@ export function Summary() {
                 <AgentChip id={r.agentId} />
               </td>
               <td className="text-right">{tokens(r.tokens)}</td>
-              <td className="text-right">{usd(r.costUsd)}</td>
+              <td className="text-right">{r.costKnown ? usd(r.costUsd) : "unpriced"}</td>
               <td className="text-right">{duration(r.activeMs)}</td>
             </tr>
           ))}
           <tr className="border-t border-line/60 font-medium">
             <td className="pt-1">total</td>
             <td className="pt-1 text-right">{tokens(usage.total.tokens)}</td>
-            <td className="pt-1 text-right">{usd(usage.total.costUsd)}</td>
+            <td className="pt-1 text-right">
+              {usage.total.costKnown ? usd(usage.total.costUsd) : "unpriced"}
+            </td>
             <td className="pt-1 text-right">{duration(usage.total.activeMs)}</td>
           </tr>
         </tbody>

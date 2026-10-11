@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useRunState, useUi } from "../app/context";
 import type { TaskStatus } from "../contract/events";
-import { clock, TASK_STATUS_LABEL } from "../state/format";
+import { clock, TASK_STATUS_LABEL, truncate } from "../state/format";
 import type { TaskView } from "../state/reduce";
 import { describeTaskChange } from "../state/selectors";
 import { AgentChip, CommitChip, RichText, TaskChip } from "../ui/chips";
@@ -27,7 +27,9 @@ function TaskRow({ task, open }: { task: TaskView; open: boolean }) {
         onClick={() => ui.set({ selectedTask: open ? undefined : task.id })}
         className="flex w-full items-baseline gap-2 px-2 py-1.5 text-left hover:bg-hub"
       >
-        <span className="shrink-0 font-medium">{task.id}</span>
+        <span className="shrink-0 font-medium" title={task.id}>
+          {truncate(task.id, 13)}
+        </span>
         <span className="min-w-0 flex-1 truncate font-sans text-body" title={task.title}>
           {task.title}
         </span>
@@ -42,7 +44,19 @@ function TaskRow({ task, open }: { task: TaskView; open: boolean }) {
         )}
       </div>
       {open && (
-        <div className="space-y-2 border-t border-line/60 px-2 py-2 text-body">
+        <div className="space-y-2 border-t border-line/60 px-2 py-2 text-body [overflow-wrap:anywhere]">
+          {task.verification && (
+            <p className="whitespace-pre-wrap">
+              <span className="text-muted">Implementation evidence (agent-reported): </span>
+              {task.verification}
+            </p>
+          )}
+          {task.review && (
+            <p className="whitespace-pre-wrap">
+              <span className="text-muted">Independent review (agent-reported): </span>
+              {task.review}
+            </p>
+          )}
           {task.description && (
             <p className="font-sans">
               <RichText text={task.description} />
