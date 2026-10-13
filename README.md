@@ -1,5 +1,9 @@
 # atoi
 
+This branch preserves the hackathon version of atoi. See the
+[snapshot and transition record](docs/hackathon-snapshot.md) for its source commit,
+scope, limitations and the direction toward broader experiments.
+
 **Persistent agent teams in the cloud.**
 
 atoi brings a team of agents into one shared conversation. Each agent has its own
