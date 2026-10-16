@@ -2,68 +2,51 @@
 
 ## Project
 
-atoi is a hackathon prototype for persistent agent swarms, built around MongoDB
-Atlas. A team of agents keeps its identity, expertise, conversations, tasks and
-workspace across sessions. Agents can discover and consult peers who have already
-investigated a problem, rather than repeatedly starting from scratch.
+atoi is being rebuilt from a hackathon prototype into a general harness for
+persistent multi-agent systems. The hackathon version is preserved on the remote
+branch `codex/snapshot-hackathon-atlas-swarms-2026-10-13`.
 
-Each agent owns one Modal cloud sandbox with a private Git clone, dependencies,
-processes and scratch files. A TypeScript worker embeds the Pi coding-agent SDK
-inside that sandbox. Stable identity, messages and Pi session checkpoints persist
-in Atlas outside the sandbox. Finishing a task leaves the agent available for
-follow-up questions. Sandbox replacement restores checkpointed context and pushed
-Git work; uncommitted files and running processes are outside the first milestone's
-recovery guarantee. Verify Modal lifecycle behavior before promising pause/resume.
+Use the minimal Pi coding-agent runtime for every agent. Reuse Pi's model/tool
+loop, native sessions and compaction. Separate agent identity and session state
+from workspace identity and execution-environment identity. A shared environment
+can host multiple workspaces (including Git worktrees), and a workspace can be
+explicitly shared by multiple agents. Separate containers or VMs are a placement
+choice; a worktree or directory is not a process, network or credential boundary.
 
-Use TypeScript, Node.js and Fastify for the coordination backend, the official
-MongoDB Node driver for Atlas, and Modal's SDK for sandbox lifecycle operations.
-The backend manages durable inboxes, task ownership, admission limits and API
-connections. Use the Temporal TypeScript SDK for a durable run supervisor,
-per-agent workflows, timers, retries, cancellation and sandbox lifecycle Activities.
-Run the Temporal worker outside agent sandboxes. Pin SDK versions and verify real
-integrations.
+Keep core invocation and placement contracts independent of databases, sandbox
+providers, workflow engines, network transports and orchestration hierarchies.
+The existing Fastify/Atlas/Temporal/Modal system is one cloud profile. Its provider
+SDK calls, HTTP tools, persistence and role-specific prompts belong in adapters.
+Do not claim that extracting the Pi core migrates the existing cloud supervisor
+or implements new transport guarantees.
 
-The main harness is the trusted backend system: Fastify, the Temporal worker and
-the outbox/reconciler. It owns all application Atlas access and Modal provider API
-calls. Agents use scoped backend tools for coordination, events and checkpoints;
-they do not access Atlas or invoke peer sandboxes directly. Model calls and Git
-access from the sandbox remain separate. Assume runs stay below 24 hours for now;
-configure explicit sandbox timeouts but defer proactive lifetime rotation.
+The default new experimental path is a bounded filesystem-backed swarm with one
+controller in one execution environment; it does not require Atlas or Temporal.
+Use Harbor's environment adapters for the first sandboxed evaluation deployment.
+Keep the whole-swarm Harbor agent separate from the core. Do not claim that this
+deployment implements independently provisioned peer environments or that local
+directories constrain agent shell access. Preserve explicit inbox, checkpoint,
+retry and failure semantics when changing executors or persistence.
 
-Agents communicate through a Slack-like team channel and peer DMs. Every agent
-can discover peers, create tasks, claim work and update progress. Initial roles
-guide behavior without restricting direct collaboration. The first milestone includes
-an orchestrator agent that assigns roles, spawns workers, seeds tasks, monitors
-progress and assesses completion. The web app launches a run with its objective
-and limits; the backend admits provisioning requests and Temporal Activities
-execute them. Keep the planning agent separate from the trusted control plane:
-Fastify and the Temporal worker are ordinary services, runnable locally or hosted,
-and enforce limits, deadlines and cleanup without relying on agent reasoning.
+The foundation should support investigating shared workspaces, explicit messaging
+and hybrid collaboration, and centralized or peer organization. Implement complete
+vertical slices before adding more mechanisms; do not create speculative provider
+plugin systems. Define visibility, ordering, concurrency, retry and cleanup semantics
+where each mechanism is implemented. "MPI-style" describes explicit messaging,
+not a claim to implement the MPI standard.
 
-Git is authoritative for shared project files and artifacts. Agents push task
-branches and exchange immutable commit references through messages and tasks.
-Atlas is authoritative for runs, agents, tasks, channels, messages, deliveries,
-session checkpoints and events. Temporal owns durable scheduling and lifecycle
-decisions with its own service and history store; Atlas is not Temporal storage.
-The live task list lives in Atlas, not Git.
+Retain structured evidence and usage from the beginning so tasks and benchmarks
+can be built on the harness. A benchmark and its verifier must remain independent
+of agent-generated success claims. Cost or quality improvements require controlled
+comparisons. See [harness foundation](docs/harness-foundation.md) for the current
+architecture, implemented slice and remaining work.
 
-The first test uses two workers, an implementer and reviewer, plus the orchestrator
-(three agents total). Support a configurable number of workers from the start,
-with no fixed role slots or pair-specific routing. The team completes a bounded task,
-exchanging durable messages and a Git commit, and recovering checkpointed context
-and pending messages after sandbox replacement and Temporal worker restart.
-Include a minimal React/Vite/Tailwind web interface for launching runs, messaging
-the team and inspecting tasks, evidence and lifecycle events. Retain the CLI for
-smoke checks against the same backend API. Browser sessions never own run lifetime.
-We reuse Pi's model/tool loop.
-
-The first milestone preserves agents across turns and tasks within a run. Run
-completion archives records and checkpoints and stops compute; resuming the same
-team across completed runs is deferred. Distinguish this limit from the long-term
-product goal of persistent teams.
-
-Follow [Milestone 1](docs/milestone-1.md) for scope and acceptance criteria.
-See [deployment boundaries](docs/deployment.md) for local and hosted topologies.
+The existing [Milestone 1](docs/milestone-1.md), [runtime](docs/runtime.md), and
+[deployment](docs/deployment.md) documents describe the hackathon/cloud profile.
+Provider-specific rules below apply when modifying that profile. They do not
+require new core code to depend on Atlas, Temporal, Modal, one environment per
+agent, or a privileged orchestrator. General correctness and engineering rules
+continue to apply to all implementations.
 
 ## Working style
 

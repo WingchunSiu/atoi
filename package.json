@@ -8,6 +8,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "swarm": "tsx --env-file-if-exists=.env src/harness/cli.ts",
     "dev": "tsx --env-file=.env src/api/main.ts",
     "build": "tsc -p tsconfig.build.json && node scripts/build-agent.mjs",
     "start": "node --env-file-if-exists=.env dist/api/main.js",

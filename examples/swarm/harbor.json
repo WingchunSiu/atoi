@@ -1,0 +1,32 @@
+{
+  "placement": {
+    "runId": "team",
+    "environments": [{ "id": "task", "stateRoot": "/logs/agent/atoi/sessions" }],
+    "workspaces": [{ "id": "task", "environmentId": "task", "path": "/app", "access": "shared" }],
+    "agents": [{ "id": "alice", "workspaceId": "task" }, { "id": "bob", "workspaceId": "task" }]
+  },
+  "controlRoot": "/logs/agent/atoi/control",
+  "objective": "Replaced with the Harbor task instruction.",
+  "communication": "hybrid",
+  "agents": [
+    {
+      "id": "alice",
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "instructions": "Implement the task. Request review from bob with concrete evidence."
+    },
+    {
+      "id": "bob",
+      "provider": "openai",
+      "model": "gpt-4.1",
+      "instructions": "Inspect the task, help with evidence, and review alice's work."
+    }
+  ],
+  "limits": {
+    "concurrency": 2,
+    "turns": 12,
+    "messages": 24,
+    "wallTimeMs": 600000,
+    "invocation": { "timeoutMs": 120000, "modelRequests": 12, "toolCalls": 30 }
+  }
+}

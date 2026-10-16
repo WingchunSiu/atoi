@@ -1,6 +1,32 @@
 # atoi
 
-**Persistent agent teams in the cloud.**
+**A harness for persistent agent teams.**
+
+atoi is evolving from its cloud hackathon prototype into a general swarm harness,
+keeping Pi as each agent's minimal runtime. Agent identity, workspace and execution
+environment are separate: agents can use worktrees in one environment, explicitly
+share a workspace, or run in separate environments. The
+[harness foundation](docs/harness-foundation.md) describes the implemented core,
+its runnable filesystem-backed swarm, checks and remaining lifecycle work.
+
+Start the new harness with Node 24+ and the repository dependencies:
+
+```sh
+export ATOI_MODEL_API_KEY=... # or configure .env
+pnpm swarm init .atoi/first 'Build a small program and have a peer review it.' hybrid
+pnpm swarm run .atoi/first/swarm.json
+pnpm swarm inspect .atoi/first/swarm.json
+```
+
+This path needs no database or cloud account. It runs independent Pi sessions in
+one environment, with file sharing, explicit peer messages or both. Directory
+separation is not security isolation. See the [Harbor integration](integrations/harbor/README.md)
+for using the whole swarm as a custom evaluation agent inside a provider-managed
+task sandbox. Cross-sandbox peers are a remaining implementation step.
+
+The web app and cloud setup below still use the existing Atlas/Temporal/Modal
+profile, with one sandbox per agent. The hackathon snapshot is preserved on
+[`codex/snapshot-hackathon-atlas-swarms-2026-10-13`](https://github.com/WingchunSiu/atoi/tree/codex/snapshot-hackathon-atlas-swarms-2026-10-13).
 
 atoi brings a team of agents into one shared conversation. Each agent has its own
 Modal sandbox, files, tools and native Pi session. Agents can divide up work,
@@ -16,7 +42,7 @@ completed runs is planned.
 
 ![Start a conversation with your agent team](docs/screenshots/new-conversation.jpg)
 
-## What you can do
+## Existing cloud profile
 
 - Start a conversation in the web app or CLI. An orchestrator chooses worker roles
   and requests peers within your configured limit.

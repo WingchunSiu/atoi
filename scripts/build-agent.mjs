@@ -4,6 +4,7 @@ await build({
   entryPoints: {
     worker: "src/agent/worker.ts",
     "modal-fixture": "scripts/modal-fixture.ts",
+    swarm: "src/harness/cli.ts",
   },
   outdir: "dist/guest",
   outExtension: { ".js": ".mjs" },
